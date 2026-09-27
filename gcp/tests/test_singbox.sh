@@ -68,6 +68,25 @@ sb_rollback() {
 expect_ok   "rollback succeeds when apt-get succeeds"          vm_fn "$SB_INSTALL" sb_rollback 0
 expect_fail "rollback fails when apt-get fails (errexit off)"  vm_fn "$SB_INSTALL" sb_rollback 100
 
+# systemd reports the Type=simple unit active as soon as it forks, before sing-box binds its ports.
+# sb_end_state N — check_end_state with both ports bound from the Nth ss probe on (0 = never bound).
+# shellcheck disable=SC2329 # the stubs are called by the sourced check_end_state
+sb_end_state() {
+  local bound_from=$1 probes="${SB_TMP}/ss-probes"
+  : >"$probes"
+  systemctl() { return 0; }
+  journalctl() { :; }
+  sleep() { :; }
+  dpkg-query() { echo 1.14.2; }
+  ss() {
+    echo probe >>"$probes" # a file, not a variable: each ss call runs in a pipeline subshell
+    if ((bound_from > 0 && $(wc -l <"$probes") >= bound_from)); then echo "LISTEN 0 4096 *:443 *:*"; fi
+  }
+  check_end_state
+}
+expect_ok   "health check waits for the ports to bind after systemd reports active"  vm_fn "$SB_INSTALL" sb_end_state 3
+expect_fail "health check fails when the ports never bind"                          vm_fn "$SB_INSTALL" sb_end_state 0
+
 expect_eq "VLESS-REALITY share URI" \
   "$(REALITY_PUBLIC_KEY=PUBKEY sb_fn "$SB_SHOW" vless_uri)" \
   "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.yahoo.co.jp&fp=chrome&pbk=PUBKEY&sid=0123456789abcdef&type=tcp&headerType=none#netguru-reality"

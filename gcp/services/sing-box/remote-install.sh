@@ -202,18 +202,28 @@ apply_config() {
   fi
 }
 
+# listening tcp|udp PORT — true once a socket is bound on PORT.
+listening() {
+  local flags=-Hltn
+  [[ "$1" == udp ]] && flags=-Hlun
+  ss "$flags" "sport = :$2" | grep -q .
+}
+
+# systemd reports the Type=simple unit active as soon as it forks, before sing-box binds its ports: poll all three.
 check_end_state() {
+  local problem
   for _ in $(seq 1 10); do
-    systemctl is-active --quiet sing-box && break
+    if ! systemctl is-active --quiet sing-box; then problem="sing-box is not active"
+    elif ! listening tcp "$SINGBOX_REALITY_PORT"; then problem="not listening on tcp/${SINGBOX_REALITY_PORT}"
+    elif ! listening udp "$SINGBOX_HY2_PORT"; then problem="not listening on udp/${SINGBOX_HY2_PORT}"
+    else
+      log "healthy: sing-box $(dpkg-query -W -f='${Version}' sing-box) on tcp/${SINGBOX_REALITY_PORT} and udp/${SINGBOX_HY2_PORT}"
+      return 0
+    fi
     sleep 1
   done
-  if ! systemctl is-active --quiet sing-box; then
-    journalctl -u sing-box -n 30 --no-pager >&2
-    die "sing-box is not active"
-  fi
-  ss -Hltn "sport = :${SINGBOX_REALITY_PORT}" | grep -q . || die "not listening on tcp/${SINGBOX_REALITY_PORT}"
-  ss -Hlun "sport = :${SINGBOX_HY2_PORT}" | grep -q . || die "not listening on udp/${SINGBOX_HY2_PORT}"
-  log "healthy: sing-box $(dpkg-query -W -f='${Version}' sing-box) on tcp/${SINGBOX_REALITY_PORT} and udp/${SINGBOX_HY2_PORT}"
+  journalctl -u sing-box -n 30 --no-pager >&2
+  die "$problem"
 }
 
 main() {
