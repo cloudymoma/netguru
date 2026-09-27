@@ -19,3 +19,8 @@ expect_fail "verify refuses to run without a local sing-box" env PATH=/usr/bin:/
 expect_eq   "verify says how to get sing-box" \
   "$(env PATH=/usr/bin:/bin gcp/verify.sh 2>&1 | tail -1)" \
   "ERROR: local sing-box not found on PATH (plan Task 6 Step 1)"
+
+expect_fail "harden refuses without CONFIRM=1" env -u CONFIRM gcp/harden.sh
+expect_eq   "harden tells the user how to proceed" \
+  "$(env -u CONFIRM gcp/harden.sh 2>&1 | tail -1)" \
+  "Re-run with CONFIRM=1 to proceed."

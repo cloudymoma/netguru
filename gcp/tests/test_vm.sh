@@ -16,3 +16,11 @@ expect_eq "live VM reports all four hardening gaps" \
   "service account attached, secure boot off, startup-script present, deletion protection off"
 expect_eq "hardened VM has no gaps" \
   "$(vm_hardening_gaps "$(vm vm-hardened.json)")" ""
+
+# The startup script must be backed up verbatim before removal; stop/start only when it buys something.
+expect_eq "startup script extracted verbatim" \
+  "$(vm_startup_script "$(vm vm-live.json)")" \
+  $'#!/bin/bash\necho redacted'
+expect_eq "no startup script on hardened VM" "$(vm_startup_script "$(vm vm-hardened.json)")" ""
+expect_eq "live VM needs the offline (stop/start) hardening" "$(vm_offline_hardening_needed "$(vm vm-live.json)")" "yes"
+expect_eq "hardened VM needs no stop/start" "$(vm_offline_hardening_needed "$(vm vm-hardened.json)")" "no"

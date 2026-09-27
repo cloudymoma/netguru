@@ -276,3 +276,14 @@ ensure_vm() {
   gaps=$(vm_hardening_gaps "$vm")
   [[ -z "$gaps" ]] || warn "VM ${VM_NAME} is not hardened (${gaps}); run: make harden CONFIRM=1"
 }
+
+# vm_startup_script VM_JSON -> startup-script metadata value (empty if none)
+vm_startup_script() {
+  jq -r '(.metadata.items // [])[] | select(.key == "startup-script") | .value' <<<"$1"
+}
+
+# vm_offline_hardening_needed VM_JSON -> yes if a stop/start is needed (SA attached or Secure Boot off)
+vm_offline_hardening_needed() {
+  jq -r 'if ((.serviceAccounts // []) | length) > 0 or .shieldedInstanceConfig.enableSecureBoot != true
+         then "yes" else "no" end' <<<"$1"
+}
