@@ -1,0 +1,1 @@
+{"name":"netguru-server-outline","network":"https://www.googleapis.com/compute/v1/projects/du-hast-mich/global/networks/netguru-net","direction":"INGRESS","priority":1000,"sourceRanges":["0.0.0.0/0"],"targetTags":["netguru-server"],"allowed":[{"IPProtocol":"tcp","ports":["45362"]},{"IPProtocol":"udp","ports":["45362"]}]}

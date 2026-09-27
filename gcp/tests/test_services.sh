@@ -5,8 +5,8 @@
 
 expect_eq "enabled services expose their declared ports" \
   "$(list_service_ports)" \
-  "outline tcp:44923
-outline udp:44923
+  "outline tcp:45362
+outline udp:45362
 sing-box tcp:443
 sing-box udp:8443"
 
@@ -33,7 +33,7 @@ expect_fail "unset remote var is rejected"      build_remote_cmd NETGURU_DEFINIT
 expect_fail "invalid remote var name rejected"  build_remote_cmd 'X;id'
 
 expect_ok   "full config validates"             validate_config
-expect_fail "allow priority must beat deny"     bash -c '. gcp/lib.sh; FW_ALLOW_PRIORITY=950; validate_config'
+expect_fail "empty subnet range is rejected"    bash -c '. gcp/lib.sh; SUBNET_RANGE=""; validate_config'
 
 # Install/upgrade targets come from the network: anything but one stable version / one digest must stop the run.
 expect_eq   "stable GitHub release resolves to X.Y.Z" \

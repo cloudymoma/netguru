@@ -10,8 +10,8 @@ expect_fail "port 65536 is rejected"          require_port P 65536
 expect_fail "non-numeric port is rejected"    require_port P 44a
 expect_fail "empty port is rejected"          require_port P ""
 
-expect_ok   "IPv4 accepted"                   require_ipv4 IP 34.146.224.39
-expect_fail "octet >255 rejected"             require_ipv4 IP 34.146.224.256
+expect_ok   "IPv4 accepted"                   require_ipv4 IP 203.0.113.100
+expect_fail "octet >255 rejected"             require_ipv4 IP 203.0.113.256
 expect_fail "hostname is not an IPv4"         require_ipv4 IP example.com
 expect_fail "IPv4 with suffix rejected"       require_ipv4 IP "1.2.3.4;rm"
 

@@ -62,9 +62,8 @@ tcp_closed() { ! tcp_open "$1"; }
 fw_matches() {
   local actual
   actual=$(run_gcloud compute firewall-rules describe "$1" --format=json 2>/dev/null) || return 1
-  [[ -z "$(firewall_rule_diff "$actual" "$2" "$3" "$4" "$5")" ]]
+  [[ -z "$(firewall_rule_diff "$actual" "$2" "$3")" ]]
 }
-legacy_api_rule_absent() { ! gcloud_resource_exists compute firewall-rules describe "${FW_LEGACY_OUTLINE_API}"; }
 
 echo "== tunnels via ${STATIC_IP}"
 outbounds=$(SHOW_FORMAT=json "${GCP_DIR}/show.sh")
@@ -89,20 +88,22 @@ echo "== exposure (from this workstation)"
 for p in $(list_service_ports | awk '{print $2}' | sed -n 's/^tcp://p'); do
   check "tcp/${p} open" tcp_open "$p"
 done
-for p in 22 "${OUTLINE_API_PORT}" 3306 6379 12345; do
+for p in 22 "${OUTLINE_API_PORT}"; do
   check "tcp/${p} closed" tcp_closed "$p"
 done
 
-echo "== VM posture and firewall"
-gaps=$(vm_hardening_gaps "$(vm_json)")
-check "VM hardened${gaps:+ (gaps: ${gaps})}" test -z "$gaps"
-check "${FW_SSH_IAP} matches spec" fw_matches "${FW_SSH_IAP}" allow "${FW_ALLOW_PRIORITY}" "${IAP_SOURCE_RANGE}" tcp:22
-check "${FW_DENY_ALL} matches spec" fw_matches "${FW_DENY_ALL}" deny "${FW_DENY_PRIORITY}" 0.0.0.0/0 all
+echo "== VM and firewall"
+problems=$(vm_invariant_problems "$(vm_json)" "${STATIC_IP}")
+check "VM matches config${problems:+ (${problems})}" test -z "$problems"
+rule=$(fw_rule_name ssh-iap)
+check "${rule} matches spec" fw_matches "$rule" "${IAP_SOURCE_RANGE}" tcp:22
 for s in ${SERVICES}; do
-  read -r rule_name rule_ports <<<"$(load_service "$s" && echo "${FW_RULE_NAME} ${FW_RULES}")"
-  check "${rule_name} matches spec" fw_matches "$rule_name" allow "${FW_ALLOW_PRIORITY}" 0.0.0.0/0 "$rule_ports"
+  rule=$(fw_rule_name "$s")
+  rule_ports=$(load_service "$s" && echo "${FW_RULES}")
+  check "${rule} matches spec" fw_matches "$rule" 0.0.0.0/0 "$rule_ports"
 done
-check "${FW_LEGACY_OUTLINE_API} deleted" legacy_api_rule_absent
+foreign=$(foreign_fw_rules "$(run_gcloud compute firewall-rules list --format=json)")
+check "${NETWORK_NAME} has no other firewall rules${foreign:+ (found: ${foreign})}" test -z "$foreign"
 
 ((FAILED == 0)) || die "verification failed (see FAIL lines above)"
 log "all checks passed"

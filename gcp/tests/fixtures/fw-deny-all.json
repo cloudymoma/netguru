@@ -1,1 +1,0 @@
-{"name":"outline-server-deny-all","network":"https://www.googleapis.com/compute/v1/projects/du-hast-mich/global/networks/default","direction":"INGRESS","priority":900,"sourceRanges":["0.0.0.0/0"],"targetTags":["outline-server"],"denied":[{"IPProtocol":"all"}]}

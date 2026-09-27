@@ -15,7 +15,7 @@ service_validate
 
 STATIC_IP=$(get_static_ip)
 require_ipv4 STATIC_IP "${STATIC_IP}"
-ensure_firewall_rule "${FW_RULE_NAME}" allow "${FW_ALLOW_PRIORITY}" 0.0.0.0/0 "${FW_RULES}"
+ensure_firewall_rule "$(fw_rule_name "$svc")" 0.0.0.0/0 "${FW_RULES}"
 if declare -F service_prepare >/dev/null; then service_prepare; fi
 
 log "running ${svc} remote-install on ${VM_NAME} (upgrade=${UPGRADE})"

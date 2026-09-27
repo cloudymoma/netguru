@@ -18,13 +18,13 @@ expect_eq "no repo digest known: recreate"  "$(vm_fn "$OUTLINE_INSTALL" outline_
 # Users identify keys by label; unnamed keys still need one.
 expect_eq "text output labels unnamed keys by id" \
   "$(vm_fn "$OUTLINE_SHOW" keys_to_text <"${FIXTURES}/outline-access-keys.json")" \
-  "  [key-0] ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdzA@34.146.224.39:44923/?outline=1
-  [alice phone] ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdzM@34.146.224.39:44923/?outline=1"
+  "  [key-0] ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdzA@203.0.113.100:45362/?outline=1
+  [alice phone] ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdzM@203.0.113.100:45362/?outline=1"
 
 # verify.sh drives these outbounds through a local sing-box; fields must match sing-box's shadowsocks schema.
 expect_eq "json output is sing-box shadowsocks outbounds" \
   "$(vm_fn "$OUTLINE_SHOW" keys_to_outbounds 1.2.3.4 <"${FIXTURES}/outline-access-keys.json" | jq -c .)" \
-  '[{"type":"shadowsocks","tag":"outline-0","server":"1.2.3.4","server_port":44923,"method":"chacha20-ietf-poly1305","password":"pw0"},{"type":"shadowsocks","tag":"outline-3","server":"1.2.3.4","server_port":44923,"method":"chacha20-ietf-poly1305","password":"pw3"}]'
+  '[{"type":"shadowsocks","tag":"outline-0","server":"1.2.3.4","server_port":45362,"method":"chacha20-ietf-poly1305","password":"pw0"},{"type":"shadowsocks","tag":"outline-3","server":"1.2.3.4","server_port":45362,"method":"chacha20-ietf-poly1305","password":"pw3"}]'
 
 # Fresh install strips the single Watchtower launch line after SHA-256 check; 0 or 2 occurrences must fail.
 OUTLINE_TMP=$(mktemp -d)

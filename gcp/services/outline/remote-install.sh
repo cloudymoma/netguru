@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VM-side (root): adopt the existing Outline server, or install it on a clean VM (spec §4.5).
+# VM-side (root): install Outline on a clean VM, or re-run on an existing install (spec §4.5).
 # Env: STATIC_IP UPGRADE(yes|no) OUTLINE_API_PORT OUTLINE_KEYS_PORT OUTLINE_INSTALLER_URL OUTLINE_INSTALLER_SHA256
 #      OUTLINE_IMAGE_REPO OUTLINE_IMAGE_TAG OUTLINE_IMAGE_DIGEST (resolved on the workstation, spec §4.10)
 set -euo pipefail

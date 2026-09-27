@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 .NOTPARALLEL:
 SERVICES := $(shell . gcp/config.env && echo $$SERVICES)
-.PHONY: all infra $(SERVICES) upgrade $(addprefix upgrade-,$(SERVICES)) show verify harden update-ip test
+.PHONY: all infra $(SERVICES) upgrade $(addprefix upgrade-,$(SERVICES)) show verify update-ip test
 
 all: infra $(SERVICES) show
 
@@ -23,9 +23,6 @@ show:
 
 verify:
 	gcp/verify.sh
-
-harden:
-	gcp/harden.sh
 
 update-ip:
 	gcp/update-ip.sh

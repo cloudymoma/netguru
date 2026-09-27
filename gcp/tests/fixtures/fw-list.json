@@ -1,0 +1,7 @@
+[
+  {"name":"default-allow-ssh","network":"https://www.googleapis.com/compute/v1/projects/du-hast-mich/global/networks/default","allowed":[{"IPProtocol":"tcp","ports":["22"]}]},
+  {"name":"netguru-server-ssh-iap","network":"https://www.googleapis.com/compute/v1/projects/du-hast-mich/global/networks/netguru-net","allowed":[{"IPProtocol":"tcp","ports":["22"]}]},
+  {"name":"netguru-server-outline","network":"https://www.googleapis.com/compute/v1/projects/du-hast-mich/global/networks/netguru-net","allowed":[{"IPProtocol":"tcp","ports":["45362"]},{"IPProtocol":"udp","ports":["45362"]}]},
+  {"name":"netguru-server-sing-box","network":"https://www.googleapis.com/compute/v1/projects/du-hast-mich/global/networks/netguru-net","allowed":[{"IPProtocol":"tcp","ports":["443"]},{"IPProtocol":"udp","ports":["8443"]}]},
+  {"name":"netguru-server-open-all","network":"https://www.googleapis.com/compute/v1/projects/du-hast-mich/global/networks/netguru-net","allowed":[{"IPProtocol":"all"}]}
+]
