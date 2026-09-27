@@ -287,3 +287,12 @@ vm_offline_hardening_needed() {
   jq -r 'if ((.serviceAccounts // []) | length) > 0 or .shieldedInstanceConfig.enableSecureBoot != true
          then "yes" else "no" end' <<<"$1"
 }
+
+# ip_rotation_state RESERVED_IP(empty if none) VM_IP(empty if none) -> attach|rotate|release|promote (spec §4.8)
+ip_rotation_state() {
+  if [[ -z "$2" ]]; then echo attach
+  elif [[ -z "$1" ]]; then echo promote
+  elif [[ "$1" == "$2" ]]; then echo rotate
+  else echo release
+  fi
+}

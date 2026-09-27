@@ -24,3 +24,8 @@ expect_fail "harden refuses without CONFIRM=1" env -u CONFIRM gcp/harden.sh
 expect_eq   "harden tells the user how to proceed" \
   "$(env -u CONFIRM gcp/harden.sh 2>&1 | tail -1)" \
   "Re-run with CONFIRM=1 to proceed."
+
+expect_fail "update-ip refuses without CONFIRM=1" env -u CONFIRM gcp/update-ip.sh
+expect_eq   "update-ip warns that client configs change" \
+  "$(env -u CONFIRM gcp/update-ip.sh 2>&1 | head -1)" \
+  "make update-ip gives ${VM_NAME} a NEW public IP: every Outline key, vless:// and hysteria2:// config changes."
