@@ -113,3 +113,166 @@ quay_tag_digest() {
   curl -fsS --max-time 20 "https://quay.io/api/v1/repository/${1#quay.io/}/tag/?specificTag=$2&onlyActiveTags=true" |
     quay_json_to_digest
 }
+
+# --- gcloud / SSH -------------------------------------------------------------
+run_gcloud() { gcloud --project="${GCP_PROJECT}" --quiet "$@"; }
+
+gcp_ssh() { run_gcloud compute ssh "${VM_NAME}" --zone="${GCP_ZONE}" --tunnel-through-iap --command="$1"; }
+
+# run_remote SCRIPT VAR... — stream a VM-side script over stdin; run as root with VARs in env.
+run_remote() {
+  local script=$1; shift
+  [[ -f "$script" ]] || die "remote script not found: ${script}"
+  gcp_ssh "$(build_remote_cmd "$@")" <"$script"
+}
+
+wait_for_ssh() {
+  local i
+  for i in $(seq 1 30); do
+    gcp_ssh true >/dev/null 2>&1 && return 0
+    log "waiting for SSH over IAP (${i}/30)"
+    sleep 5
+  done
+  die "SSH over IAP to ${VM_NAME} not available after 150s"
+}
+
+# gcloud_resource_exists <describe args...> -> 0 exists, 1 not found, dies on any other error
+gcloud_resource_exists() {
+  local err
+  if err=$(run_gcloud "$@" --format='value(name)' 2>&1 >/dev/null); then return 0; fi
+  [[ "$err" == *"was not found"* || "$err" == *"notFound"* ]] && return 1
+  die "gcloud $* failed: ${err}"
+}
+
+# --- firewall (spec §4.2) -----------------------------------------------------
+# firewall_rule_diff ACTUAL_JSON ACTION PRIORITY RANGES RULES -> differing field names, space-separated
+firewall_rule_diff() {
+  jq -r --arg network "${NETWORK_NAME}" --arg tag "${NETWORK_TAG}" \
+    --arg action "$2" --arg priority "$3" --arg ranges "$4" --arg rules "$5" '
+    def norm: split(",") | map(select(length > 0)) | sort | join(",");
+    def actual_rules:
+      (.allowed // .denied // [])
+      | map(if .IPProtocol == "all" then "all"
+            else .IPProtocol as $p | (.ports // [""])[] | if . == "" then $p else "\($p):\(.)" end
+            end)
+      | sort | join(",");
+    [ (if (.network | split("/") | last) != $network then "network" else empty end),
+      (if .direction != "INGRESS" then "direction" else empty end),
+      (if (if .allowed then "allow" else "deny" end) != $action then "action" else empty end),
+      (if (.priority | tostring) != $priority then "priority" else empty end),
+      (if ((.sourceRanges // []) | sort | join(",")) != ($ranges | norm) then "source-ranges" else empty end),
+      (if ((.targetTags // []) | sort | join(",")) != $tag then "target-tags" else empty end),
+      (if actual_rules != ($rules | norm) then "rules" else empty end)
+    ] | join(" ")' <<<"$1"
+}
+
+# ensure_firewall_rule NAME ACTION(allow|deny) PRIORITY SOURCE_RANGES RULES("tcp:443,udp:8443" | "all")
+ensure_firewall_rule() {
+  local name=$1 action=$2 priority=$3 ranges=$4 rules=$5 actual diff
+  if ! gcloud_resource_exists compute firewall-rules describe "$name"; then
+    log "creating firewall rule ${name}: ${action} ${rules} from ${ranges} (priority ${priority})"
+    run_gcloud compute firewall-rules create "$name" --network="${NETWORK_NAME}" --direction=INGRESS \
+      --action="$action" --rules="$rules" --priority="$priority" --source-ranges="$ranges" \
+      --target-tags="${NETWORK_TAG}" --description="managed by netguru"
+    return
+  fi
+  actual=$(run_gcloud compute firewall-rules describe "$name" --format=json)
+  diff=$(firewall_rule_diff "$actual" "$action" "$priority" "$ranges" "$rules")
+  if [[ -z "$diff" ]]; then
+    log "firewall rule ${name} is up to date"
+    return
+  fi
+  case " ${diff} " in
+    *" network "* | *" direction "* | *" action "*)
+      die "firewall rule ${name} differs in immutable field(s) (${diff}); delete it manually and re-run" ;;
+  esac
+  log "updating firewall rule ${name} (${diff})"
+  run_gcloud compute firewall-rules update "$name" --rules="$rules" --priority="$priority" \
+    --source-ranges="$ranges" --target-tags="${NETWORK_TAG}"
+}
+
+delete_firewall_rule_if_exists() {
+  if gcloud_resource_exists compute firewall-rules describe "$1"; then
+    log "deleting firewall rule $1"
+    run_gcloud compute firewall-rules delete "$1"
+  else
+    log "firewall rule $1 already absent"
+  fi
+}
+
+ensure_service_firewall() {
+  (load_service "$1" && ensure_firewall_rule "${FW_RULE_NAME}" allow "${FW_ALLOW_PRIORITY}" 0.0.0.0/0 "${FW_RULES}")
+}
+
+# Order is a safety invariant (spec §4.2): never create the deny before SSH-over-IAP works
+# and every service allow already outranks it.
+ensure_base_firewall() {
+  run_gcloud services enable iap.googleapis.com
+  ensure_firewall_rule "${FW_SSH_IAP}" allow "${FW_ALLOW_PRIORITY}" "${IAP_SOURCE_RANGE}" tcp:22
+  log "verifying SSH over IAP"
+  gcp_ssh true || die "SSH over IAP failed; refusing to create ${FW_DENY_ALL} (would risk lock-out)"
+  local s
+  for s in ${SERVICES}; do ensure_service_firewall "$s"; done
+  ensure_firewall_rule "${FW_DENY_ALL}" deny "${FW_DENY_PRIORITY}" 0.0.0.0/0 all
+}
+
+# --- static IP / VM (spec §4.3) -----------------------------------------------
+get_static_ip() {
+  run_gcloud compute addresses describe "${STATIC_IP_NAME}" --region="${GCP_REGION}" --format='value(address)'
+}
+
+ensure_static_ip() {
+  if gcloud_resource_exists compute addresses describe "${STATIC_IP_NAME}" --region="${GCP_REGION}"; then
+    log "static IP ${STATIC_IP_NAME} = $(get_static_ip)"
+  else
+    log "reserving static IP ${STATIC_IP_NAME}"
+    run_gcloud compute addresses create "${STATIC_IP_NAME}" --region="${GCP_REGION}" --network-tier=PREMIUM
+  fi
+}
+
+vm_json() { run_gcloud compute instances describe "${VM_NAME}" --zone="${GCP_ZONE}" --format=json; }
+
+# vm_invariant_problems VM_JSON STATIC_IP -> "; "-joined drift descriptions (empty = OK)
+vm_invariant_problems() {
+  jq -r --arg tag "${NETWORK_TAG}" --arg ip "$2" '
+    (.networkInterfaces[0].accessConfigs[0].natIP // "none") as $nat
+    | [ (if .status != "RUNNING" then "status \(.status)" else empty end),
+        (if ((.tags.items // []) | index($tag)) == null then "missing tag \($tag)" else empty end),
+        (if $nat != $ip then "external IP \($nat) != static \($ip)" else empty end)
+      ] | join("; ")' <<<"$1"
+}
+
+# vm_hardening_gaps VM_JSON -> ", "-joined missing hardening items (empty = hardened)
+vm_hardening_gaps() {
+  jq -r '
+    [ (if ((.serviceAccounts // []) | length) > 0 then "service account attached" else empty end),
+      (if .shieldedInstanceConfig.enableSecureBoot != true then "secure boot off" else empty end),
+      (if ((.metadata.items // []) | map(.key) | index("startup-script")) != null then "startup-script present" else empty end),
+      (if .deletionProtection != true then "deletion protection off" else empty end)
+    ] | join(", ")' <<<"$1"
+}
+
+ensure_vm() {
+  if ! gcloud_resource_exists compute instances describe "${VM_NAME}" --zone="${GCP_ZONE}"; then
+    log "creating VM ${VM_NAME}"
+    run_gcloud compute instances create "${VM_NAME}" --zone="${GCP_ZONE}" \
+      --machine-type="${VM_MACHINE_TYPE}" --boot-disk-size="${VM_DISK_SIZE}" \
+      --image-family="${VM_IMAGE_FAMILY}" --image-project="${VM_IMAGE_PROJECT}" \
+      --network="${NETWORK_NAME}" --tags="${NETWORK_TAG}" \
+      --address="${STATIC_IP_NAME}" --network-tier=PREMIUM \
+      --no-service-account --no-scopes \
+      --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
+      --metadata=enable-oslogin=TRUE --deletion-protection
+  fi
+  local vm problems gaps
+  vm=$(vm_json)
+  if [[ "$(jq -r .status <<<"$vm")" == "TERMINATED" ]]; then
+    log "starting VM ${VM_NAME}"
+    run_gcloud compute instances start "${VM_NAME}" --zone="${GCP_ZONE}"
+    vm=$(vm_json)
+  fi
+  problems=$(vm_invariant_problems "$vm" "$(get_static_ip)")
+  [[ -z "$problems" ]] || die "VM ${VM_NAME} drifted from config: ${problems}"
+  gaps=$(vm_hardening_gaps "$vm")
+  [[ -z "$gaps" ]] || warn "VM ${VM_NAME} is not hardened (${gaps}); run: make harden CONFIRM=1"
+}

@@ -1,0 +1,1 @@
+{"name":"x","network":"projects/du-hast-mich/global/networks/default","direction":"INGRESS","priority":800,"sourceRanges":["35.235.240.0/20","10.0.0.0/8"],"targetTags":["outline-server"],"allowed":[{"IPProtocol":"tcp","ports":["8443","443"]}]}
