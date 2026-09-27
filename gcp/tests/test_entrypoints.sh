@@ -14,3 +14,8 @@ expect_eq   "make upgrade upgrades each service in order, without touching infra
   "$(make -n upgrade | grep -oE '(UPGRADE=yes )?gcp/(infra|deploy)\.sh( [a-z-]+)?' | tr '\n' '|')" \
   "UPGRADE=yes gcp/deploy.sh outline|UPGRADE=yes gcp/deploy.sh sing-box|"
 expect_fail "deploy rejects UPGRADE other than yes/no" env UPGRADE=maybe gcp/deploy.sh outline
+
+expect_fail "verify refuses to run without a local sing-box" env PATH=/usr/bin:/bin gcp/verify.sh
+expect_eq   "verify says how to get sing-box" \
+  "$(env PATH=/usr/bin:/bin gcp/verify.sh 2>&1 | tail -1)" \
+  "ERROR: local sing-box not found on PATH (plan Task 6 Step 1)"
