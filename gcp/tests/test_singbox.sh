@@ -56,6 +56,18 @@ expect_eq "re-deploy keeps an older version"  "$(vm_fn "$SB_INSTALL" singbox_ins
 expect_eq "upgrade moves to the target"       "$(vm_fn "$SB_INSTALL" singbox_install_action 1.14.1 1.14.2 yes)" "upgrade"
 expect_eq "upgrade at target is a no-op"      "$(vm_fn "$SB_INSTALL" singbox_install_action 1.14.2 1.14.2 yes)" "keep"
 
+# main() calls rollback_package inside `if !`, where errexit is off: a failed apt-get must still return non-zero.
+# shellcheck disable=SC2034,SC2329 # globals and the apt-get stub are used by the sourced rollback_package
+sb_rollback() {
+  local apt_status=$1
+  PKG_CHANGED=yes
+  PREV_VERSION=1.14.1
+  apt-get() { return "$apt_status"; }
+  rollback_package
+}
+expect_ok   "rollback succeeds when apt-get succeeds"          vm_fn "$SB_INSTALL" sb_rollback 0
+expect_fail "rollback fails when apt-get fails (errexit off)"  vm_fn "$SB_INSTALL" sb_rollback 100
+
 expect_eq "VLESS-REALITY share URI" \
   "$(REALITY_PUBLIC_KEY=PUBKEY sb_fn "$SB_SHOW" vless_uri)" \
   "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.yahoo.co.jp&fp=chrome&pbk=PUBKEY&sid=0123456789abcdef&type=tcp&headerType=none#netguru-reality"
@@ -72,3 +84,28 @@ expect_eq "Hysteria2 client trusts only the pinned cert, never insecure" \
 expect_eq "REALITY client uses chrome uTLS and the server public key" \
   "$(jq -r '.[0].tls | [.utls.fingerprint, (.reality.public_key | length > 0)] | map(tostring) | join(",")' "${SB_TMP}/outbounds.json")" \
   "chrome,true"
+
+# GPG keyring extraction must reject extra keys (one or two armor blocks) and wrong pins, and export only the pinned key.
+SB_GPG_GH=$(mktemp -d)
+chmod 700 "$SB_GPG_GH"
+gpg --homedir "$SB_GPG_GH" --batch --quiet --import "${FIXTURES}/sagernet-gpg.asc"
+gpg --homedir "$SB_GPG_GH" --batch --passphrase "" --pinentry-mode loopback --quiet \
+  --quick-generate-key "extra@example.com" ed25519 sign never
+gpg --homedir "$SB_GPG_GH" --armor --export >"${SB_TMP}/one-block-two-keys.asc"
+gpg --homedir "$SB_GPG_GH" --armor --export "extra@example.com" >"${SB_TMP}/extra-only.asc"
+printf '%s\n%s\n' "$(cat "${FIXTURES}/sagernet-gpg.asc")" "$(cat "${SB_TMP}/extra-only.asc")" >"${SB_TMP}/two-blocks.asc"
+gpgconf --homedir "$SB_GPG_GH" --kill all 2>/dev/null || true
+rm -rf "$SB_GPG_GH"
+
+expect_ok "genuine SagerNet key is accepted and exported" \
+  vm_fn "$SB_INSTALL" extract_pinned_gpg_key "${FIXTURES}/sagernet-gpg.asc" "${SINGBOX_GPG_FINGERPRINT}" "${SB_TMP}/sagernet.gpg"
+expect_eq "exported keyring contains solely the pinned primary key" \
+  "$(gpg --show-keys --with-colons "${SB_TMP}/sagernet.gpg" | awk -F: '$1=="pub"{want=1;next} want&&$1=="fpr"{print $10; want=0}')" \
+  "${SINGBOX_GPG_FINGERPRINT}"
+expect_fail "genuine key + extra key in one armor block is rejected" \
+  vm_fn "$SB_INSTALL" extract_pinned_gpg_key "${SB_TMP}/one-block-two-keys.asc" "${SINGBOX_GPG_FINGERPRINT}" "${SB_TMP}/bad1.gpg"
+expect_fail "genuine key + second armor block is rejected" \
+  vm_fn "$SB_INSTALL" extract_pinned_gpg_key "${SB_TMP}/two-blocks.asc" "${SINGBOX_GPG_FINGERPRINT}" "${SB_TMP}/bad2.gpg"
+expect_fail "wrong pinned fingerprint is rejected" \
+  vm_fn "$SB_INSTALL" extract_pinned_gpg_key "${FIXTURES}/sagernet-gpg.asc" "$(printf '0%.0s' {1..40})" "${SB_TMP}/bad3.gpg"
+rm -rf "$SB_TMP"

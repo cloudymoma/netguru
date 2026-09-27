@@ -25,3 +25,16 @@ expect_eq "text output labels unnamed keys by id" \
 expect_eq "json output is sing-box shadowsocks outbounds" \
   "$(vm_fn "$OUTLINE_SHOW" keys_to_outbounds 1.2.3.4 <"${FIXTURES}/outline-access-keys.json" | jq -c .)" \
   '[{"type":"shadowsocks","tag":"outline-0","server":"1.2.3.4","server_port":44923,"method":"chacha20-ietf-poly1305","password":"pw0"},{"type":"shadowsocks","tag":"outline-3","server":"1.2.3.4","server_port":44923,"method":"chacha20-ietf-poly1305","password":"pw3"}]'
+
+# Fresh install strips the single Watchtower launch line after SHA-256 check; 0 or 2 occurrences must fail.
+OUTLINE_TMP=$(mktemp -d)
+WT_LINE='  run_step "Starting Watchtower" start_watchtower'
+printf 'before\n%s\nafter\n' "$WT_LINE" >"${OUTLINE_TMP}/one.sh"
+printf 'before\nafter\n' >"${OUTLINE_TMP}/zero.sh"
+printf 'before\n%s\n%s\nafter\n' "$WT_LINE" "$WT_LINE" >"${OUTLINE_TMP}/two.sh"
+
+expect_ok   "installer with one watchtower line is stripped" vm_fn "$OUTLINE_INSTALL" strip_installer_watchtower "${OUTLINE_TMP}/one.sh"
+expect_eq   "only the watchtower line is removed"            "$(cat "${OUTLINE_TMP}/one.sh")" $'before\nafter'
+expect_fail "installer without watchtower line is rejected"  vm_fn "$OUTLINE_INSTALL" strip_installer_watchtower "${OUTLINE_TMP}/zero.sh"
+expect_fail "installer with two watchtower lines is rejected" vm_fn "$OUTLINE_INSTALL" strip_installer_watchtower "${OUTLINE_TMP}/two.sh"
+rm -rf "$OUTLINE_TMP"

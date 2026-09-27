@@ -14,6 +14,7 @@ PREV_VERSION=""
 
 die() { echo "[sing-box] ERROR: $*" >&2; exit 1; }
 log() { echo "[sing-box] $*" >&2; }
+warn() { echo "[sing-box] WARN: $*" >&2; }
 
 enable_bbr() {
   if [[ "${SINGBOX_ENABLE_BBR}" != true ]]; then log "BBR disabled by config"; return; fi
@@ -30,17 +31,37 @@ singbox_install_action() {
   fi
 }
 
+# extract_pinned_gpg_key KEY_FILE PINNED_FPR OUT_FILE — fail unless KEY_FILE holds one armor block
+# whose sole primary key is PINNED_FPR; write only that re-exported binary key to OUT_FILE.
+extract_pinned_gpg_key() {
+  local key_file=$1 pinned_fpr=$2 out_file=$3 blocks gh fprs tmp
+  blocks=$(grep -cxFe '-----BEGIN PGP PUBLIC KEY BLOCK-----' "$key_file" || true)
+  [[ "$blocks" == 1 ]] || die "expected 1 PGP key block in ${key_file}, got ${blocks}"
+  gh=$(mktemp -d)
+  chmod 700 "$gh"
+  gpg --homedir "$gh" --batch --quiet --import "$key_file" 2>/dev/null ||
+    { rm -rf "$gh"; die "gpg failed to import ${key_file}"; }
+  fprs=$(gpg --homedir "$gh" --batch --with-colons --list-keys |
+    awk -F: '$1 == "pub" { want = 1; next } want && $1 == "fpr" { print $10; want = 0 }')
+  if [[ "$fprs" != "$pinned_fpr" ]]; then
+    rm -rf "$gh"
+    die "sing-box GPG key fingerprint(s) '${fprs//$'\n'/,}' != pinned ${pinned_fpr}"
+  fi
+  tmp="${gh}/pinned.gpg"
+  gpg --homedir "$gh" --batch --export "$pinned_fpr" >"$tmp"
+  [[ -s "$tmp" ]] || { rm -rf "$gh"; die "gpg export produced an empty keyring for ${pinned_fpr}"; }
+  install -D -m 0644 "$tmp" "$out_file"
+  rm -rf "$gh"
+}
+
 install_package() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -q
   apt-get install "${APT_OPTS[@]}" ca-certificates curl gnupg jq openssl
-  local key fpr installed action newest
+  local key installed action newest
   key=$(mktemp)
   curl -fsSL https://sing-box.app/gpg.key -o "$key"
-  fpr=$(gpg --show-keys --with-colons "$key" | awk -F: '/^fpr/{print $10; exit}')
-  [[ "$fpr" == "${SINGBOX_GPG_FINGERPRINT}" ]] ||
-    die "sing-box GPG key fingerprint ${fpr} != pinned ${SINGBOX_GPG_FINGERPRINT}"
-  install -D -m 0644 "$key" /etc/apt/keyrings/sagernet.asc
+  extract_pinned_gpg_key "$key" "${SINGBOX_GPG_FINGERPRINT}" /etc/apt/keyrings/sagernet.gpg
   rm -f "$key"
   cat >/etc/apt/sources.list.d/sagernet.sources <<'SOURCES'
 Types: deb
@@ -48,7 +69,7 @@ URIs: https://deb.sagernet.org/
 Suites: *
 Components: *
 Enabled: yes
-Signed-By: /etc/apt/keyrings/sagernet.asc
+Signed-By: /etc/apt/keyrings/sagernet.gpg
 SOURCES
   apt-get update -q
   installed=$(dpkg-query -W -f='${Version}' sing-box 2>/dev/null || true)
@@ -74,10 +95,11 @@ SOURCES
 }
 
 # Never leave a package on disk that rejects our config: it would fail at the next restart or reboot.
+# Explicit `|| return 1`: main() calls this inside `if !`, where errexit is off.
 rollback_package() {
   [[ "$PKG_CHANGED" == yes && -n "$PREV_VERSION" ]] || return 0
   log "rolling back sing-box to ${PREV_VERSION}"
-  apt-get install "${APT_OPTS[@]}" --allow-downgrades "sing-box=${PREV_VERSION}"
+  apt-get install "${APT_OPTS[@]}" --allow-downgrades "sing-box=${PREV_VERSION}" || return 1
   PKG_CHANGED=no
 }
 
@@ -202,7 +224,10 @@ main() {
   ensure_credentials
   ensure_cert
   apply_config
-  check_end_state
+  if ! (check_end_state); then
+    if ! { rollback_package && systemctl restart sing-box; }; then warn "rollback/restart failed"; fi
+    die "sing-box unhealthy after install/upgrade"
+  fi
 }
 
 [[ -n "${NETGURU_SOURCE_ONLY:-}" ]] || main

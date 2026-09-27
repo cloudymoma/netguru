@@ -101,6 +101,16 @@ ensure_swap() {
   grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
 }
 
+# strip_installer_watchtower FILE — remove the single Watchtower launch line from the verified installer.
+strip_installer_watchtower() {
+  local line='  run_step "Starting Watchtower" start_watchtower' count tmp
+  count=$(grep -cxF "$line" "$1" || true)
+  [[ "$count" == 1 ]] || die "expected 1 '${line}' line in $1, got ${count}"
+  tmp=$(mktemp)
+  grep -vxF "$line" "$1" >"$tmp"
+  mv "$tmp" "$1"
+}
+
 fresh_install() {
   log "no Outline found: installing (pinned installer)"
   ensure_swap
@@ -109,15 +119,17 @@ fresh_install() {
   apt-get install -y -q docker.io
   systemctl enable --now docker
   pull_verified_image
-  local installer
+  local installer target="${OUTLINE_IMAGE_REPO}@${OUTLINE_IMAGE_DIGEST}"
   installer=$(mktemp)
   curl -fsSL "${OUTLINE_INSTALLER_URL}" -o "$installer"
   echo "${OUTLINE_INSTALLER_SHA256}  ${installer}" | sha256sum -c --quiet - ||
     die "installer checksum mismatch for ${OUTLINE_INSTALLER_URL}"
+  strip_installer_watchtower "$installer"
   bash "$installer" --hostname="${STATIC_IP}" --api-port="${OUTLINE_API_PORT}" \
     --keys-port="${OUTLINE_KEYS_PORT}" </dev/null
   rm -f "$installer"
   remove_watchtower
+  grep -qxF "$target" <<<"$(running_repo_digests)" || die "shadowbox is not running ${target} after fresh install"
 }
 
 adopt() {

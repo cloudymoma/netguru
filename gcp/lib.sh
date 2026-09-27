@@ -267,6 +267,8 @@ ensure_vm() {
   local vm problems gaps
   vm=$(vm_json)
   if [[ "$(jq -r .status <<<"$vm")" == "TERMINATED" ]]; then
+    [[ -z "$(vm_startup_script "$vm")" ]] ||
+      die "VM ${VM_NAME} is TERMINATED with startup-script present (starting it would re-run the Outline installer); run: make harden CONFIRM=1"
     log "starting VM ${VM_NAME}"
     run_gcloud compute instances start "${VM_NAME}" --zone="${GCP_ZONE}"
     vm=$(vm_json)

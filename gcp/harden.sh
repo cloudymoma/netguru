@@ -58,10 +58,12 @@ fi
 if [[ "$(vm_offline_hardening_needed "$(vm_json)")" == yes ]]; then
   log "stopping ${VM_NAME} — Outline downtime starts"
   log "rollback if it fails to boot: stop, 'gcloud compute instances update ${VM_NAME} --zone=${GCP_ZONE} --no-shielded-secure-boot', start"
+  trap 'warn "failed while ${VM_NAME} was stopped; starting it"; run_gcloud compute instances start "${VM_NAME}" --zone="${GCP_ZONE}" || warn "START FAILED: ${VM_NAME} is STOPPED, start it manually"' EXIT
   run_gcloud compute instances stop "${VM_NAME}" --zone="${GCP_ZONE}"
   run_gcloud compute instances set-service-account "${VM_NAME}" --zone="${GCP_ZONE}" --no-service-account --no-scopes
   run_gcloud compute instances update "${VM_NAME}" --zone="${GCP_ZONE}" --shielded-secure-boot
   run_gcloud compute instances start "${VM_NAME}" --zone="${GCP_ZONE}"
+  trap - EXIT
   wait_for_ssh
   log "${VM_NAME} is back"
 else
