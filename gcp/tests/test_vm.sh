@@ -31,3 +31,18 @@ ensure_vm_stopped() {
 }
 expect_ok   "ensure_vm starts a stopped VM" ensure_vm_stopped
 expect_fail "ensure_vm stops the run on drift" ensure_vm_stopped 1.2.3.4
+
+# A missing VM is created with the configured boot disk type: gcloud's default (pd-standard) gives a 10 GB disk
+# only 1.2 MiB/s, too slow for the fresh install and any swapping.
+# ensure_vm_created — ensure_vm when the VM does not exist; prints the create call's arguments, one per line.
+# shellcheck disable=SC2329 # stubs invoked by ensure_vm in lib.sh
+ensure_vm_created() {
+  gcloud_resource_exists() { return 1; }
+  get_static_ip() { echo 203.0.113.100; }
+  run_gcloud() { printf '%s\n' "$@"; }
+  vm_json() { cat "${FIXTURES}/vm-netguru.json"; }
+  ensure_vm
+}
+expect_eq "a new VM gets the configured boot disk type" \
+  "$(ensure_vm_created 2>/dev/null | grep -xF -e "--boot-disk-type=${VM_DISK_TYPE:-unset}")" \
+  "--boot-disk-type=${VM_DISK_TYPE:-unset}"

@@ -276,7 +276,8 @@ ensure_vm() {
   if ! gcloud_resource_exists compute instances describe "${VM_NAME}" --zone="${GCP_ZONE}"; then
     log "creating VM ${VM_NAME}"
     run_gcloud compute instances create "${VM_NAME}" --zone="${GCP_ZONE}" \
-      --machine-type="${VM_MACHINE_TYPE}" --boot-disk-size="${VM_DISK_SIZE}" \
+      --machine-type="${VM_MACHINE_TYPE}" \
+      --boot-disk-size="${VM_DISK_SIZE}" --boot-disk-type="${VM_DISK_TYPE}" \
       --image-family="${VM_IMAGE_FAMILY}" --image-project="${VM_IMAGE_PROJECT}" \
       --network="${NETWORK_NAME}" --subnet="${NETWORK_NAME}" --tags="${NETWORK_TAG}" \
       --address="${STATIC_IP_NAME}" --network-tier=PREMIUM \

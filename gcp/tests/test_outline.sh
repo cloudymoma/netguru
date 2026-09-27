@@ -37,4 +37,18 @@ expect_ok   "installer with one watchtower line is stripped" vm_fn "$OUTLINE_INS
 expect_eq   "only the watchtower line is removed"            "$(cat "${OUTLINE_TMP}/one.sh")" $'before\nafter'
 expect_fail "installer without watchtower line is rejected"  vm_fn "$OUTLINE_INSTALL" strip_installer_watchtower "${OUTLINE_TMP}/zero.sh"
 expect_fail "installer with two watchtower lines is rejected" vm_fn "$OUTLINE_INSTALL" strip_installer_watchtower "${OUTLINE_TMP}/two.sh"
+
+# The installer prints Outline Manager's {"apiUrl": …} credential (the API's secret prefix) to stdout; it must not
+# leave the VM, while progress lines still stream and an installer failure still fails the deploy.
+cat >"${OUTLINE_TMP}/installer.sh" <<'SH'
+echo "> Starting Shadowbox ........ OK"
+printf '\033[1;32m{"apiUrl":"https://203.0.113.100:15634/c2VjcmV0","certSha256":"AB12"}\033[0m\n'
+echo "- Management port 15634, for TCP"
+exit "$1"
+SH
+expect_eq   "installer output drops only the credential line" \
+  "$(vm_fn "$OUTLINE_INSTALL" run_installer "${OUTLINE_TMP}/installer.sh" 0)" \
+  $'> Starting Shadowbox ........ OK\n- Management port 15634, for TCP'
+expect_ok   "installer success passes through the filter" vm_fn "$OUTLINE_INSTALL" run_installer "${OUTLINE_TMP}/installer.sh" 0
+expect_fail "installer failure survives the filter"       vm_fn "$OUTLINE_INSTALL" run_installer "${OUTLINE_TMP}/installer.sh" 3
 rm -rf "$OUTLINE_TMP"

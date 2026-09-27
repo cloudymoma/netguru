@@ -111,6 +111,15 @@ strip_installer_watchtower() {
   mv "$tmp" "$1"
 }
 
+# run_installer FILE ARGS... — run the verified installer; drop its Outline Manager credential line
+# ({"apiUrl": …}, which embeds the management API's secret prefix) so it never leaves the VM (spec §1.3).
+# pipefail keeps the installer's exit status; sed -u passes progress through line by line.
+run_installer() {
+  local installer=$1
+  shift
+  bash "$installer" "$@" </dev/null | sed -u '/"apiUrl"/d'
+}
+
 fresh_install() {
   log "no Outline found: installing (pinned installer)"
   ensure_swap
@@ -125,8 +134,8 @@ fresh_install() {
   echo "${OUTLINE_INSTALLER_SHA256}  ${installer}" | sha256sum -c --quiet - ||
     die "installer checksum mismatch for ${OUTLINE_INSTALLER_URL}"
   strip_installer_watchtower "$installer"
-  bash "$installer" --hostname="${STATIC_IP}" --api-port="${OUTLINE_API_PORT}" \
-    --keys-port="${OUTLINE_KEYS_PORT}" </dev/null
+  run_installer "$installer" --hostname="${STATIC_IP}" --api-port="${OUTLINE_API_PORT}" \
+    --keys-port="${OUTLINE_KEYS_PORT}"
   rm -f "$installer"
   remove_watchtower
   grep -qxF "$target" <<<"$(running_repo_digests)" || die "shadowbox is not running ${target} after fresh install"
