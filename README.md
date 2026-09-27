@@ -33,7 +33,7 @@ billable (about US$21/month in asia-northeast1 at the time of writing), plus int
 
 Edit [`gcp/config.env`](gcp/config.env):
 
-- `GCP_PROJECT`: **required**, your project ID (or per run: `GCP_PROJECT=my-project make all`).
+- `GCP_PROJECT`: your project ID (or per run: `GCP_PROJECT=my-project make all`).
 - `GCP_REGION`, `GCP_ZONE`: where the VM runs. If you move it out of Japan, also set `SINGBOX_REALITY_SNI` to a
   well-known site near the new region that serves TLS 1.3 and HTTP/2 and isn't a commonly abused default such as
   `www.apple.com`. The installer checks TLS 1.3 and HTTP/2 and stops if either is missing.
@@ -48,13 +48,14 @@ Edit [`gcp/config.env`](gcp/config.env):
 | Command | What it does |
 |---|---|
 | `make test` | shellcheck and offline unit tests; no GCP access |
-| `make all` | create or reconcile the infrastructure, install or adopt each service, then print client configs; safe to re-run |
-| `make show` | print client configs: Outline `ss://` keys, `vless://` and `hysteria2://` URIs, and writes a complete sing-box client profile for SFI/SFA/SFM to `netguru-client.json` in the repo root (mode 600, git-ignored; `SHOW_FORMAT=json` prints the bare outbounds array instead). **Contains secrets.** |
+| `make all` | create or reconcile the infrastructure, install or adopt each service, then `make show`; safe to re-run |
+| `make show` | print Outline `ss://` keys and `vless://` / `hysteria2://` URIs; write a sing-box profile for SFI/SFA/SFM to `netguru-client.json` (mode 600, git-ignored). **Contains secrets.** |
 | `make verify` | end-to-end check from your workstation: each tunnel, blocked metadata server, open and closed ports, VM and firewall settings |
 | `make upgrade` | move Outline to the current `stable` image and sing-box to `SINGBOX_VERSION` (latest by default); a no-op when current |
 | `make update-ip CONFIRM=1` | give the VM a new public IP; every client config changes |
 
-`make infra` runs only the infrastructure step; `make outline` and `make sing-box` run it plus one service.
+`make infra` runs only the infrastructure step; `make outline` and `make sing-box` run it plus one service;
+`make upgrade-outline` and `make upgrade-sing-box` upgrade one service.
 
 ## SSH access and `IAP_SOURCE_RANGE`
 
@@ -88,3 +89,7 @@ time out at `waiting for SSH over IAP`, and `make verify` would report port 22 a
 If `make infra` gives up with `SSH over IAP to netguru-server not available after 150s`, check the roles above,
 that your network allows HTTPS to `tunnel.cloudproxy.app`, and that no organization firewall policy blocks
 `35.235.240.0/20`.
+
+## License
+
+[The Bindiego License (BDL), Version 1.0](LICENSE)
