@@ -1,4 +1,4 @@
-# netguru — secure multi-VPN on one GCP VM. Spec: docs/superpowers/specs/2026-09-26-gcp-outline-singbox-design.md
+# netguru — secure multi-VPN on one GCP VM.
 SHELL := /bin/bash
 .NOTPARALLEL:
 SERVICES := $(shell . gcp/config.env && echo $$SERVICES)
