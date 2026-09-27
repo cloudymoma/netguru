@@ -49,9 +49,6 @@ VLESS-REALITY (tcp/${SINGBOX_REALITY_PORT}):
 
 Hysteria2 (udp/${SINGBOX_HY2_PORT}) — only use clients that honor pinSHA256 (official Hysteria2, sing-box based):
   $(hy2_uri)
-
-sing-box client outbounds (SFI/SFA/SFM), certificate-pinned:
-$(client_outbounds)
 TEXT
 }
 

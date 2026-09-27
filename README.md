@@ -49,7 +49,7 @@ Edit [`gcp/config.env`](gcp/config.env):
 |---|---|
 | `make test` | shellcheck and offline unit tests; no GCP access |
 | `make all` | create or reconcile the infrastructure, install or adopt each service, then print client configs; safe to re-run |
-| `make show` | print client configs: Outline `ss://` keys, `vless://` and `hysteria2://` URIs, sing-box outbound JSON (`SHOW_FORMAT=json` for JSON only). **Contains secrets.** |
+| `make show` | print client configs: Outline `ss://` keys, `vless://` and `hysteria2://` URIs, and writes a complete sing-box client profile for SFI/SFA/SFM to `netguru-client.json` in the repo root (mode 600, git-ignored; `SHOW_FORMAT=json` prints the bare outbounds array instead). **Contains secrets.** |
 | `make verify` | end-to-end check from your workstation: each tunnel, blocked metadata server, open and closed ports, VM and firewall settings |
 | `make upgrade` | move Outline to the current `stable` image and sing-box to `SINGBOX_VERSION` (latest by default); a no-op when current |
 | `make update-ip CONFIRM=1` | give the VM a new public IP; every client config changes |

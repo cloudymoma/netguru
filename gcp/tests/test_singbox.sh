@@ -104,6 +104,35 @@ expect_eq "REALITY client uses chrome uTLS and the server public key" \
   "$(jq -r '.[0].tls | [.utls.fingerprint, (.reality.public_key | length > 0)] | map(tostring) | join(",")' "${SB_TMP}/outbounds.json")" \
   "chrome,true"
 
+# make show prints a whole profile that the sing-box apps accept as pasted; a bare outbounds array is rejected by them.
+vm_fn "$OUTLINE_SHOW" keys_to_outbounds 1.2.3.4 <"${FIXTURES}/outline-access-keys.json" |
+  jq -s 'add' - "${SB_TMP}/outbounds.json" | jq -s 'add' | client_profile >"${SB_TMP}/profile.json"
+expect_ok "client profile passes 'sing-box check' (1.14.2)" sing-box check -c "${SB_TMP}/profile.json"
+expect_eq "client profile offers every service, REALITY by default" \
+  "$(jq -c '.outbounds[0] | [.tag, .default, .outbounds]' "${SB_TMP}/profile.json")" \
+  '["proxy","netguru-reality",["outline-0","outline-3","netguru-reality","netguru-hy2"]]'
+expect_eq "client profile sends private destinations direct, everything else through the proxy" \
+  "$(jq -c '.route | [(.rules[] | select(.ip_is_private) | .outbound), .final]' "${SB_TMP}/profile.json")" \
+  '["direct","proxy"]'
+expect_eq "client profile defaults to the first server when REALITY is absent" \
+  "$(vm_fn "$OUTLINE_SHOW" keys_to_outbounds 1.2.3.4 <"${FIXTURES}/outline-access-keys.json" | client_profile | jq -r '.outbounds[0].default')" \
+  "outline-0"
+expect_fail "client profile refuses an empty server list" client_profile <<<'[]'
+
+# The profile file holds client secrets: owner-only even when it replaces an older, looser file; never clobbered by a failure.
+printf 'old\n' >"${SB_TMP}/netguru-client.json"
+chmod 644 "${SB_TMP}/netguru-client.json"
+write_client_profile "${SB_TMP}/netguru-client.json" <"${SB_TMP}/outbounds.json"
+expect_ok "written profile file passes 'sing-box check'" sing-box check -c "${SB_TMP}/netguru-client.json"
+expect_eq "written profile file is readable only by its owner" "$(stat -c %a "${SB_TMP}/netguru-client.json")" "600"
+expect_fail "writing a profile with no servers fails" write_client_profile "${SB_TMP}/netguru-client.json" <<<'[]'
+expect_ok "a failed write leaves the previous profile intact" sing-box check -c "${SB_TMP}/netguru-client.json"
+printf 'elsewhere\n' >"${SB_TMP}/elsewhere"
+ln -s "${SB_TMP}/elsewhere" "${SB_TMP}/linked.json"
+write_client_profile "${SB_TMP}/linked.json" <"${SB_TMP}/outbounds.json"
+expect_eq "a symlinked profile path is replaced, never written through" \
+  "$(cat "${SB_TMP}/elsewhere"),$(test -L "${SB_TMP}/linked.json" && echo link || echo file)" "elsewhere,file"
+
 # GPG keyring extraction must reject extra keys (one or two armor blocks) and wrong pins, and export only the pinned key.
 SB_GPG_GH=$(mktemp -d)
 chmod 700 "$SB_GPG_GH"

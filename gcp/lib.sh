@@ -111,6 +111,38 @@ quay_tag_digest() {
     quay_json_to_digest
 }
 
+# --- client profile -------------------------------------------------------------
+# client_profile — stdin: JSON array of sing-box outbounds (SHOW_FORMAT=json); stdout: a complete sing-box
+# client profile for SFI/SFA/SFM: TUN, DNS over HTTPS through the proxy, private destinations direct,
+# and a "proxy" selector over every server (REALITY by default).
+client_profile() {
+  local outbounds
+  outbounds=$(cat)
+  jq -e 'length > 0' <<<"$outbounds" >/dev/null || die "no client outbounds: is any service installed?"
+  jq '{
+    log: {level: "warn"},
+    dns: {servers: [{type: "https", tag: "remote", server: "1.1.1.1", detour: "proxy"}, {type: "local", tag: "local"}],
+          final: "remote"},
+    inbounds: [{type: "tun", tag: "tun-in", address: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+                auto_route: true, strict_route: true}],
+    outbounds: ([{type: "selector", tag: "proxy", outbounds: map(.tag),
+                  default: ((map(select(.type == "vless") | .tag) + map(.tag))[0])}]
+                + . + [{type: "direct", tag: "direct"}]),
+    route: {rules: [{action: "sniff"}, {protocol: "dns", action: "hijack-dns"}, {ip_is_private: true, outbound: "direct"}],
+            final: "proxy", auto_detect_interface: true, default_domain_resolver: "local"}
+  }' <<<"$outbounds"
+}
+
+# write_client_profile FILE — stdin: as client_profile; write the profile to FILE, readable only by the owner.
+# Written to a 0600 temp file, then renamed: FILE is untouched on failure, and a symlink at FILE is replaced,
+# never written through.
+write_client_profile() {
+  local profile tmp
+  profile=$(client_profile) || return 1
+  tmp=$(mktemp "$1.XXXXXX") || return 1
+  if ! printf '%s\n' "$profile" >"$tmp" || ! mv -f "$tmp" "$1"; then rm -f "$tmp"; return 1; fi
+}
+
 # --- gcloud / SSH -------------------------------------------------------------
 run_gcloud() { gcloud --project="${GCP_PROJECT}" --quiet "$@"; }
 
