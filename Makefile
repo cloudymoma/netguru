@@ -2,7 +2,25 @@
 SHELL := /bin/bash
 .NOTPARALLEL:
 SERVICES := $(shell . gcp/config.env && echo $$SERVICES)
-.PHONY: all infra $(SERVICES) upgrade $(addprefix upgrade-,$(SERVICES)) show verify update-ip test
+.PHONY: help all infra $(SERVICES) upgrade $(addprefix upgrade-,$(SERVICES)) show verify update-ip test
+
+help:
+	@printf '%s\n' \
+	  'Usage: make <target>' \
+	  '' \
+	  'Targets:' \
+	  '  help                 Show this help message (default)' \
+	  '  all                  Ensure infra, deploy all services, and show client configs' \
+	  '  infra                Ensure VPC, subnet, firewall rules, static IP, VM, and SSH over IAP' \
+	  '  outline              Ensure infra and deploy Outline' \
+	  '  sing-box             Ensure infra and deploy sing-box (VLESS-REALITY + Hysteria2)' \
+	  '  upgrade              Upgrade all services to their latest upstream image/release' \
+	  '  upgrade-outline      Upgrade Outline shadowbox container to the latest stable digest' \
+	  '  upgrade-sing-box     Upgrade sing-box package to SINGBOX_VERSION (latest by default)' \
+	  '  show                 Print client URIs/keys and write netguru-client.json (contains secrets)' \
+	  '  verify               Run end-to-end tunnel, metadata-blocking, port, and firewall checks' \
+	  '  update-ip CONFIRM=1  Rotate the VM'\''s public static IP and re-sync services' \
+	  '  test                 Run shellcheck and offline unit tests'
 
 all: infra $(SERVICES) show
 

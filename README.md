@@ -47,6 +47,7 @@ Edit [`gcp/config.env`](gcp/config.env):
 
 | Command | What it does |
 |---|---|
+| `make` / `make help` | list available targets |
 | `make test` | shellcheck and offline unit tests; no GCP access |
 | `make all` | create or reconcile the infrastructure, install or adopt each service, then `make show`; safe to re-run |
 | `make show` | print Outline `ss://` keys and `vless://` / `hysteria2://` URIs; write a sing-box profile for SFI/SFA/SFM to `netguru-client.json` (mode 600, git-ignored). **Contains secrets.** |
