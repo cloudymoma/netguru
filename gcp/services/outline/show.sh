@@ -28,7 +28,8 @@ main() {
   port=$(container_env SB_API_PORT)
   pin=$(openssl x509 -in "$API_CERT" -pubkey -noout | openssl pkey -pubin -outform der |
     openssl dgst -sha256 -binary | base64)
-  keys=$(curl -fsS -k --pinnedpubkey "sha256//${pin}" "https://localhost:${port}/${prefix}/access-keys")
+  keys=$(curl -fsS --max-time 10 --retry 3 --retry-connrefused --retry-delay 1 -k \
+    --pinnedpubkey "sha256//${pin}" "https://localhost:${port}/${prefix}/access-keys")
   if [[ "${SHOW_FORMAT:-text}" == json ]]; then
     keys_to_outbounds "${STATIC_IP}" <<<"$keys"
   else

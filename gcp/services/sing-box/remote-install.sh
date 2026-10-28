@@ -8,13 +8,25 @@ set -euo pipefail
 ETC=/etc/sing-box
 CREDS="${ETC}/credentials.env"
 CERT_DIR="${ETC}/certs"
-APT_OPTS=(-y -q -o Dpkg::Options::=--force-confold)
+APT_OPTS=(-y -q -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3 -o Dpkg::Options::=--force-confold) # wait out unattended-upgrades
 PKG_CHANGED=no
+CERT_CHANGED=no
 PREV_VERSION=""
 
 die() { echo "[sing-box] ERROR: $*" >&2; exit 1; }
 log() { echo "[sing-box] $*" >&2; }
 warn() { echo "[sing-box] WARN: $*" >&2; }
+
+# DPkg::Lock::Timeout only covers the dpkg locks; apt-get update takes /var/lib/apt/lists/lock without waiting.
+apt_update() {
+  local i
+  for i in $(seq 1 12); do
+    apt-get "${APT_OPTS[@]}" update && return 0
+    log "apt-get update failed (attempt ${i}/12; apt-daily may hold the lists lock); retrying in 10s"
+    sleep 10
+  done
+  die "apt-get update failed after 12 attempts"
+}
 
 enable_bbr() {
   if [[ "${SINGBOX_ENABLE_BBR}" != true ]]; then log "BBR disabled by config"; return; fi
@@ -56,11 +68,11 @@ extract_pinned_gpg_key() {
 
 install_package() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -q
-  apt-get install "${APT_OPTS[@]}" ca-certificates curl gnupg jq openssl
+  apt_update
+  apt-get "${APT_OPTS[@]}" install ca-certificates curl gnupg jq openssl
   local key installed action newest
   key=$(mktemp)
-  curl -fsSL https://sing-box.app/gpg.key -o "$key"
+  curl -fsSL --retry 3 --max-time 30 https://sing-box.app/gpg.key -o "$key"
   extract_pinned_gpg_key "$key" "${SINGBOX_GPG_FINGERPRINT}" /etc/apt/keyrings/sagernet.gpg
   rm -f "$key"
   cat >/etc/apt/sources.list.d/sagernet.sources <<'SOURCES'
@@ -71,7 +83,7 @@ Components: *
 Enabled: yes
 Signed-By: /etc/apt/keyrings/sagernet.gpg
 SOURCES
-  apt-get update -q
+  apt_update
   installed=$(dpkg-query -W -f='${Version}' sing-box 2>/dev/null || true)
   action=$(singbox_install_action "$installed" "${SINGBOX_TARGET_VERSION}" "${UPGRADE:-no}")
   if [[ "$action" == keep ]]; then
@@ -105,12 +117,14 @@ rollback_package() {
 
 check_reality_target() {
   local v
-  v=$(curl -sS --tlsv1.3 --http2 -o /dev/null -w '%{http_version}' --max-time 10 "https://${SINGBOX_REALITY_SNI}/") ||
+  v=$(curl -sS --tlsv1.3 --http2 -o /dev/null -w '%{http_version}' --retry 3 --max-time 10 "https://${SINGBOX_REALITY_SNI}/") ||
     die "cannot reach REALITY target ${SINGBOX_REALITY_SNI} over TLS 1.3"
   [[ "$v" == 2 ]] || die "REALITY target ${SINGBOX_REALITY_SNI} must speak HTTP/2 over TLS 1.3 (got HTTP/${v})"
 }
 
+# A generated file is validated before it becomes $CREDS: once there, it is reused on every later deploy.
 ensure_credentials() {
+  local src=$CREDS v
   if [[ -f "$CREDS" ]]; then
     log "reusing existing credentials"
   else
@@ -126,24 +140,30 @@ ensure_credentials() {
       echo "HY2_PASSWORD=$(sing-box generate rand 16 --hex)"
     } >"$tmp"
     chmod 600 "$tmp"
-    mv "$tmp" "$CREDS"
+    src=$tmp
   fi
   # shellcheck disable=SC1090
-  . "$CREDS"
-  local v
+  . "$src"
   for v in VLESS_UUID REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID HY2_PASSWORD; do
-    [[ -n "${!v:-}" ]] || die "${v} missing from ${CREDS}"
+    [[ -n "${!v:-}" ]] || { [[ "$src" == "$CREDS" ]] || rm -f "$src"; die "${v} missing from ${src}"; }
   done
+  [[ "$src" == "$CREDS" ]] || mv "$src" "$CREDS"
 }
 
+# Keep the cert while it matches SINGBOX_HY2_SNI (clients pin it); mark CERT_CHANGED when replaced so sing-box restarts.
+# -checkhost exits 0 on a mismatch in OpenSSL 3.0 (Debian 12): match its output instead.
 ensure_cert() {
   install -d -m 0700 "$CERT_DIR"
-  [[ -f "${CERT_DIR}/hy2.crt" && -f "${CERT_DIR}/hy2.key" ]] && return
+  if [[ -s "${CERT_DIR}/hy2.key" ]] && openssl x509 -in "${CERT_DIR}/hy2.crt" -noout \
+    -checkhost "${SINGBOX_HY2_SNI}" 2>/dev/null | grep -q ' does match '; then
+    return
+  fi
   log "generating Hysteria2 self-signed certificate for ${SINGBOX_HY2_SNI}"
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
     -subj "/CN=${SINGBOX_HY2_SNI}" -addext "subjectAltName=DNS:${SINGBOX_HY2_SNI}" \
     -keyout "${CERT_DIR}/hy2.key" -out "${CERT_DIR}/hy2.crt" 2>/dev/null
   chmod 600 "${CERT_DIR}/hy2.key"
+  CERT_CHANGED=yes
 }
 
 render_singbox_config() {
@@ -181,10 +201,10 @@ needs_restart() {
 }
 
 apply_config() {
-  local new="${ETC}/config.json.new" others changed=no active=no
+  local new="${ETC}/config.json.new" others changed=${CERT_CHANGED} active=no
   others=$(find "$ETC" -maxdepth 1 -name '*.json' ! -name config.json)
   [[ -z "$others" ]] || die "unexpected *.json in ${ETC} (sing-box -C would merge them): ${others}"
-  render_singbox_config >"$new"
+  (umask 077 && render_singbox_config >"$new") # holds private keys: never world-readable
   chmod 600 "$new"
   if ! sing-box check -c "$new"; then
     rm -f "$new"
@@ -235,7 +255,9 @@ main() {
   ensure_cert
   apply_config
   if ! (check_end_state); then
-    if ! { rollback_package && systemctl restart sing-box; }; then warn "rollback/restart failed"; fi
+    if [[ "$PKG_CHANGED" == yes && -n "$PREV_VERSION" ]]; then
+      if ! { rollback_package && systemctl restart sing-box; }; then warn "rollback/restart failed"; fi
+    fi
     die "sing-box unhealthy after install/upgrade"
   fi
 }

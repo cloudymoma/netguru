@@ -7,9 +7,22 @@ set -euo pipefail
 STATE_DIR=/opt/outline/persisted-state
 SERVER_CONFIG="${STATE_DIR}/shadowbox_server_config.json"
 API_CERT="${STATE_DIR}/shadowbox-selfsigned.crt"
+APT_OPTS=(-y -q -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3) # wait out unattended-upgrades and transient mirror errors
 
 die() { echo "[outline] ERROR: $*" >&2; exit 1; }
 log() { echo "[outline] $*" >&2; }
+warn() { echo "[outline] WARN: $*" >&2; }
+
+# DPkg::Lock::Timeout only covers the dpkg locks; apt-get update takes /var/lib/apt/lists/lock without waiting.
+apt_update() {
+  local i
+  for i in $(seq 1 12); do
+    apt-get "${APT_OPTS[@]}" update && return 0
+    log "apt-get update failed (attempt ${i}/12; apt-daily may hold the lists lock); retrying in 10s"
+    sleep 10
+  done
+  die "apt-get update failed after 12 attempts"
+}
 
 # outline_state HAS_CONTAINER HAS_STATE -> fresh|adopt|partial
 outline_state() {
@@ -68,7 +81,7 @@ load_api() {
 api() {
   local method=$1 path=$2
   shift 2
-  curl -fsS -k --pinnedpubkey "sha256//${API_PIN}" -X "$method" \
+  curl -fsS --max-time 10 -k --pinnedpubkey "sha256//${API_PIN}" -X "$method" \
     "https://localhost:${API_PORT}/${API_PREFIX}${path}" "$@"
 }
 
@@ -85,17 +98,15 @@ ensure_packages() {
   for p in ca-certificates curl jq openssl; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
   ((${#missing[@]} == 0)) && return
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -q
-  apt-get install -y -q "${missing[@]}"
+  apt_update
+  apt-get "${APT_OPTS[@]}" install "${missing[@]}"
 }
 
 ensure_swap() {
   if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
-    if [[ ! -f /swapfile ]]; then
-      fallocate -l 2G /swapfile
-      chmod 600 /swapfile
-      mkswap /swapfile >/dev/null
-    fi
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
     swapon /swapfile
   fi
   grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
@@ -124,13 +135,13 @@ fresh_install() {
   log "no Outline found: installing (pinned installer)"
   ensure_swap
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -q
-  apt-get install -y -q docker.io
+  apt_update
+  apt-get "${APT_OPTS[@]}" install docker.io
   systemctl enable --now docker
   pull_verified_image
   local installer target="${OUTLINE_IMAGE_REPO}@${OUTLINE_IMAGE_DIGEST}"
   installer=$(mktemp)
-  curl -fsSL "${OUTLINE_INSTALLER_URL}" -o "$installer"
+  curl -fsSL --retry 3 --max-time 30 "${OUTLINE_INSTALLER_URL}" -o "$installer"
   echo "${OUTLINE_INSTALLER_SHA256}  ${installer}" | sha256sum -c --quiet - ||
     die "installer checksum mismatch for ${OUTLINE_INSTALLER_URL}"
   strip_installer_watchtower "$installer"
@@ -177,7 +188,7 @@ key_count() { api GET /access-keys | jq '.accessKeys | length'; }
 
 upgrade_image() {
   require_digest
-  local target="${OUTLINE_IMAGE_REPO}@${OUTLINE_IMAGE_DIGEST}" start="${STATE_DIR}/start_container.sh" before after
+  local target="${OUTLINE_IMAGE_REPO}@${OUTLINE_IMAGE_DIGEST}" start="${STATE_DIR}/start_container.sh" prev before after
   if [[ "$(outline_upgrade_action "$(running_repo_digests)" "$target")" == keep ]]; then
     log "shadowbox already runs ${target}; nothing to upgrade"
     return
@@ -185,12 +196,18 @@ upgrade_image() {
   grep -qF "\"${OUTLINE_IMAGE_REPO}:${OUTLINE_IMAGE_TAG}\"" "$start" ||
     die "${start} does not run ${OUTLINE_IMAGE_REPO}:${OUTLINE_IMAGE_TAG}; refusing to recreate"
   if grep -q 'docker pull' "$start"; then die "${start} pulls images itself; refusing (would bypass digest verification)"; fi
+  prev=$(docker inspect -f '{{.Image}}' shadowbox)
   before=$(key_count)
   log "upgrading shadowbox: $(running_repo_digests | head -n1) -> ${target}"
   pull_verified_image
-  bash "$start" >/dev/null
+  if ! (bash "$start" >/dev/null && load_api && wait_healthy); then
+    log "rolling back shadowbox to ${prev}"
+    if ! { docker tag "$prev" "${OUTLINE_IMAGE_REPO}:${OUTLINE_IMAGE_TAG}" && bash "$start" >/dev/null; }; then
+      warn "rollback failed; shadowbox may be down"
+    fi
+    die "shadowbox unhealthy after upgrade"
+  fi
   load_api
-  wait_healthy
   after=$(key_count)
   [[ "$after" == "$before" ]] || die "access-key count changed during upgrade: ${before} -> ${after}"
   grep -qxF "$target" <<<"$(running_repo_digests)" || die "shadowbox is not running ${target} after the upgrade"

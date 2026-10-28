@@ -51,4 +51,50 @@ expect_eq   "installer output drops only the credential line" \
   $'> Starting Shadowbox ........ OK\n- Management port 15634, for TCP'
 expect_ok   "installer success passes through the filter" vm_fn "$OUTLINE_INSTALL" run_installer "${OUTLINE_TMP}/installer.sh" 0
 expect_fail "installer failure survives the filter"       vm_fn "$OUTLINE_INSTALL" run_installer "${OUTLINE_TMP}/installer.sh" 3
+
+# If a new shadowbox image fails wait_healthy during upgrade, upgrade_image re-tags the previous image ID and restarts.
+# shellcheck disable=SC2034,SC2329 # globals and stubs are used by the sourced upgrade_image
+outline_upgrade_rollback() {
+  local fail_rollback=${1:-no}
+  STATE_DIR="${OUTLINE_TMP}/state"
+  OUTLINE_IMAGE_DIGEST="sha256:545c6f7c7261bb30ae1dffe24a6fca5f8512f5d17c72cfb9e410e7e655444e62"
+  mkdir -p "$STATE_DIR"
+  : >"${OUTLINE_TMP}/docker-log"
+  printf 'docker run "%s:%s"\n' "${OUTLINE_IMAGE_REPO}" "${OUTLINE_IMAGE_TAG}" >"${STATE_DIR}/start_container.sh"
+  running_repo_digests() { echo "quay.io/outline/shadowbox@sha256:$(printf '0%.0s' {1..64})"; }
+  key_count() { echo 2; }
+  load_api() { :; }
+  wait_healthy() { exit 1; }
+  docker() {
+    if [[ "$1" == inspect ]]; then echo "sha256:prev-image-id"; return 0; fi
+    if [[ "$fail_rollback" == yes && "$1" == tag && "$2" == "sha256:prev-image-id" ]]; then return 1; fi
+    echo "$*" >>"${OUTLINE_TMP}/docker-log"
+  }
+  bash() { echo "start $*" >>"${OUTLINE_TMP}/docker-log"; }
+  upgrade_image
+}
+expect_fail "unhealthy shadowbox upgrade fails" vm_fn "$OUTLINE_INSTALL" outline_upgrade_rollback
+expect_eq   "unhealthy shadowbox upgrade re-tags the previous image and restarts" \
+  "$(tail -n 2 "${OUTLINE_TMP}/docker-log")" \
+  $'tag sha256:prev-image-id quay.io/outline/shadowbox:stable\nstart '"${OUTLINE_TMP}/state/start_container.sh"
+expect_eq   "failed shadowbox rollback warns loudly" \
+  "$(vm_fn "$OUTLINE_INSTALL" outline_upgrade_rollback yes 2>&1 | grep 'WARN:')" \
+  "[outline] WARN: rollback failed; shadowbox may be down"
+
+# apt-get update does not honor DPkg::Lock::Timeout on /var/lib/apt/lists/lock: apt_update retries until the lock clears.
+# shellcheck disable=SC2329
+outline_apt_update() {
+  local succeed_on=$1 tries="${OUTLINE_TMP}/apt-tries"
+  : >"$tries"
+  sleep() { :; }
+  apt-get() {
+    echo try >>"$tries"
+    ((succeed_on > 0 && $(wc -l <"$tries") >= succeed_on))
+  }
+  apt_update
+}
+expect_ok   "apt_update succeeds once the lists lock clears" vm_fn "$OUTLINE_INSTALL" outline_apt_update 3
+expect_eq   "apt_update stops retrying after success"        "$(wc -l <"${OUTLINE_TMP}/apt-tries")" "3"
+expect_fail "apt_update dies after 12 failed attempts"       vm_fn "$OUTLINE_INSTALL" outline_apt_update 0
+expect_eq   "apt_update tries 12 times before dying"         "$(wc -l <"${OUTLINE_TMP}/apt-tries")" "12"
 rm -rf "$OUTLINE_TMP"

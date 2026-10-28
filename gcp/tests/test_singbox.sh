@@ -68,6 +68,21 @@ sb_rollback() {
 expect_ok   "rollback succeeds when apt-get succeeds"          vm_fn "$SB_INSTALL" sb_rollback 0
 expect_fail "rollback fails when apt-get fails (errexit off)"  vm_fn "$SB_INSTALL" sb_rollback 100
 
+# apt-get update does not honor DPkg::Lock::Timeout on /var/lib/apt/lists/lock: apt_update retries until the lock clears.
+# shellcheck disable=SC2329
+sb_apt_update() {
+  local succeed_on=$1 tries="${SB_TMP}/apt-tries"
+  : >"$tries"
+  sleep() { :; }
+  apt-get() {
+    echo try >>"$tries"
+    ((succeed_on > 0 && $(wc -l <"$tries") >= succeed_on))
+  }
+  apt_update
+}
+expect_ok   "sing-box apt_update succeeds once the lists lock clears" vm_fn "$SB_INSTALL" sb_apt_update 3
+expect_fail "sing-box apt_update dies after 12 failed attempts"       vm_fn "$SB_INSTALL" sb_apt_update 0
+
 # systemd reports the Type=simple unit active as soon as it forks, before sing-box binds its ports.
 # sb_end_state N — check_end_state with both ports bound from the Nth ss probe on (0 = never bound).
 # shellcheck disable=SC2329 # the stubs are called by the sourced check_end_state
@@ -86,6 +101,37 @@ sb_end_state() {
 }
 expect_ok   "health check waits for the ports to bind after systemd reports active"  vm_fn "$SB_INSTALL" sb_end_state 3
 expect_fail "health check fails when the ports never bind"                          vm_fn "$SB_INSTALL" sb_end_state 0
+
+# Credentials are generated once and reused forever: a file with a missing value must never be persisted.
+# shellcheck disable=SC2034,SC2329 # globals and the sing-box stub are used by the sourced ensure_credentials
+sb_creds() {
+  local fail_uuid=$1
+  ETC="${SB_TMP}/etc-${fail_uuid}"
+  CREDS="${ETC}/credentials.env"
+  mkdir -p "$ETC"
+  if [[ "$fail_uuid" == yes ]]; then
+    sing-box() { if [[ "$2" == uuid ]]; then return 1; fi; command sing-box "$@"; }
+  fi
+  ensure_credentials
+}
+expect_ok   "credentials are generated when absent"                    vm_fn "$SB_INSTALL" sb_creds no
+expect_eq   "generated credentials are complete and owner-only" \
+  "$(stat -c %a "${SB_TMP}/etc-no/credentials.env"),$(grep -c '^[A-Z0-9_]*=.' "${SB_TMP}/etc-no/credentials.env")" "600,5"
+expect_fail "a failed generator step stops the install"                vm_fn "$SB_INSTALL" sb_creds yes
+expect_fail "a failed generator step persists no credentials file"     test -e "${SB_TMP}/etc-yes/credentials.env"
+
+# Clients verify the Hysteria2 cert against SINGBOX_HY2_SNI (JSON profile) and pin its hash (URI): keep it while
+# the SNI is unchanged, replace it when the SNI changes.
+# shellcheck disable=SC2034 # read by the sourced ensure_cert
+sb_cert() { CERT_DIR="${SB_TMP}/certs"; SINGBOX_HY2_SNI=$1; ensure_cert && echo "$CERT_CHANGED"; }
+sb_cert_fpr() { openssl x509 -in "${SB_TMP}/certs/hy2.crt" -noout -fingerprint -sha256; }
+expect_eq "initial cert generation marks CERT_CHANGED=yes" "$(vm_fn "$SB_INSTALL" sb_cert a.example.com 2>/dev/null)" "yes"
+SB_FPR=$(sb_cert_fpr)
+expect_eq "re-deploy with the same SNI marks CERT_CHANGED=no" "$(vm_fn "$SB_INSTALL" sb_cert a.example.com 2>/dev/null)" "no"
+expect_eq "re-deploy with the same SNI keeps the cert (clients pin it)" "$(sb_cert_fpr)" "$SB_FPR"
+expect_eq "a changed SNI marks CERT_CHANGED=yes" "$(vm_fn "$SB_INSTALL" sb_cert b.example.com 2>/dev/null)" "yes"
+expect_ok "a changed SNI gets a cert valid for the new name" \
+  bash -c "openssl x509 -in '${SB_TMP}/certs/hy2.crt' -noout -checkhost b.example.com | grep -q 'does match'"
 
 expect_eq "VLESS-REALITY share URI" \
   "$(REALITY_PUBLIC_KEY=PUBKEY sb_fn "$SB_SHOW" vless_uri)" \
