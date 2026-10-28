@@ -19,7 +19,7 @@ help:
 	  '  upgrade-sing-box     Upgrade sing-box package to SINGBOX_VERSION (latest by default)' \
 	  '  show                 Print client URIs/keys and write netguru-client.json (contains secrets)' \
 	  '  verify               Run end-to-end tunnel, metadata-blocking, port, and firewall checks' \
-	  '  update-ip CONFIRM=1  Rotate the VM'\''s public static IP and re-sync services' \
+	  '  update-ip CONFIRM=1  Rotate the VM'\''s public static IP and re-sync services (every client config changes)' \
 	  '  test                 Run shellcheck and offline unit tests'
 
 all: infra $(SERVICES) show

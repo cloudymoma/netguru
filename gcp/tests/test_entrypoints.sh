@@ -7,8 +7,8 @@ expect_eq   "deploy explains the rejection" \
   "$(gcp/deploy.sh nope 2>&1)" \
   "ERROR: service 'nope' is not in SERVICES (outline sing-box)"
 expect_fail "show rejects unknown SHOW_FORMAT"         env SHOW_FORMAT=yaml gcp/show.sh
-expect_eq   "default make target is help (touches no GCP scripts)" \
-  "$(make)" "$(make help)"
+expect_eq   "default make target is help (runs no GCP scripts)" \
+  "$(make -n)" "$(make -n help)"
 expect_ok   "make help lists core targets" \
   bash -c 'make help | grep -q "update-ip CONFIRM=1" && make help | grep -q "upgrade-sing-box"'
 expect_eq   "make all runs infra, then services in order, then show" \
