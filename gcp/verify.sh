@@ -36,6 +36,7 @@ start_proxy() {
   sing-box run -c "${WORK}/client.json" >"${WORK}/client.log" 2>&1 &
   PROXY_PID=$!
   for _ in $(seq 1 20); do
+    kill -0 "$PROXY_PID" 2>/dev/null || break
     nc -z 127.0.0.1 "$PROXY_PORT" 2>/dev/null && return 0
     sleep 0.25
   done
@@ -50,7 +51,7 @@ stop_proxy() {
 }
 
 via_proxy() { curl -sS --max-time 15 -x "socks5h://127.0.0.1:${PROXY_PORT}" "$@"; }
-egress_is_static() { [[ "$(via_proxy https://api.ipify.org 2>/dev/null)" == "${STATIC_IP}" ]]; }
+egress_is_static() { [[ "$(via_proxy --retry 2 --retry-all-errors --retry-delay 1 https://api.ipify.org 2>/dev/null)" == "${STATIC_IP}" ]]; }
 blocked() { ! via_proxy -o /dev/null -H 'Metadata-Flavor: Google' "$1" 2>/dev/null; }
 metadata_blocked() {
   blocked http://169.254.169.254/computeMetadata/v1/ && blocked http://metadata.google.internal/computeMetadata/v1/

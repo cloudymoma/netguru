@@ -34,6 +34,15 @@ expect_fail "invalid remote var name rejected"  build_remote_cmd 'X;id'
 
 expect_ok   "full config validates"             validate_config
 expect_fail "empty subnet range is rejected"    bash -c '. gcp/lib.sh; SUBNET_RANGE=""; validate_config'
+# gcloud defaults an unset source range to 0.0.0.0/0, which would open SSH to the internet.
+expect_fail "empty IAP source range is rejected" bash -c '. gcp/lib.sh; IAP_SOURCE_RANGE=""; validate_config'
+# Call inside `if` so errexit is suppressed: the subshell failure on the first service must still propagate.
+expect_fail "unknown first service fails list_service_ports (errexit off)" \
+  bash -c '. gcp/lib.sh; SERVICES="nope sing-box"; if list_service_ports; then exit 0; else exit 1; fi'
+expect_fail "bad service config fails validate_config" \
+  bash -c '. gcp/lib.sh; SINGBOX_REALITY_SNI="<TBD>"; if validate_config; then exit 0; else exit 1; fi'
+expect_fail "bad first service fails validate_config (errexit off)" \
+  bash -c '. gcp/lib.sh; OUTLINE_API_PORT=bad; if validate_config; then exit 0; else exit 1; fi'
 
 # Install/upgrade targets come from the network: anything but one stable version / one digest must stop the run.
 expect_eq   "stable GitHub release resolves to X.Y.Z" \

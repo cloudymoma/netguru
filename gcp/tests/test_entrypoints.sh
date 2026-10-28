@@ -24,3 +24,16 @@ expect_fail "update-ip refuses without CONFIRM=1" env -u CONFIRM gcp/update-ip.s
 expect_eq   "update-ip warns that client configs change" \
   "$(env -u CONFIRM gcp/update-ip.sh 2>&1 | head -1)" \
   "make update-ip gives ${VM_NAME} a NEW public IP: every Outline key, vless:// and hysteria2:// config changes."
+
+# A stopped VM gets no ephemeral IP, so a swap would strand it without one: refuse before any gcloud mutation.
+UIP_BIN=$(mktemp -d)
+cat >"${UIP_BIN}/gcloud" <<STUB
+#!/usr/bin/env bash
+if [[ " \$* " == *" instances describe "* ]]; then jq '.status = "TERMINATED"' "${PWD}/${FIXTURES}/vm-netguru.json"; exit 0; fi
+if [[ " \$* " == *" addresses describe "* ]]; then echo 203.0.113.100; exit 0; fi
+echo "\$*" >>"${UIP_BIN}/mutations"
+STUB
+chmod +x "${UIP_BIN}/gcloud"
+expect_fail "update-ip refuses a stopped VM" env CONFIRM=1 PATH="${UIP_BIN}:${PATH}" gcp/update-ip.sh
+expect_eq   "update-ip changes nothing on a stopped VM" "$(cat "${UIP_BIN}/mutations" 2>/dev/null)" ""
+rm -rf "$UIP_BIN"

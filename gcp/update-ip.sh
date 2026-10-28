@@ -16,6 +16,7 @@ fi
 validate_config
 
 vm=$(vm_json)
+[[ "$(jq -r .status <<<"$vm")" == RUNNING ]] || die "VM ${VM_NAME} is not RUNNING (run 'make infra' first)"
 vm_ip=$(jq -r '.networkInterfaces[0].accessConfigs[0].natIP // ""' <<<"$vm")
 ac_name=$(jq -r '.networkInterfaces[0].accessConfigs[0].name // "external-nat"' <<<"$vm")
 reserved_ip=""

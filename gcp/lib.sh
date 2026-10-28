@@ -55,7 +55,7 @@ load_service() {
 list_service_ports() {
   local s
   for s in ${SERVICES}; do
-    (load_service "$s" && tr ',' '\n' <<<"${FW_RULES}" | sed "s/^/${s} /")
+    (load_service "$s" && tr ',' '\n' <<<"${FW_RULES}" | sed "s/^/${s} /") || return 1
   done
 }
 
@@ -80,10 +80,11 @@ build_remote_cmd() {
 }
 
 validate_config() {
-  local v
-  for v in GCP_PROJECT GCP_REGION GCP_ZONE VM_NAME NETWORK_NAME SUBNET_RANGE NETWORK_TAG STATIC_IP_NAME SERVICES; do
+  local v s
+  for v in GCP_PROJECT GCP_REGION GCP_ZONE VM_NAME NETWORK_NAME SUBNET_RANGE NETWORK_TAG STATIC_IP_NAME IAP_SOURCE_RANGE SERVICES; do
     require_not_tbd "$v" "${!v}"
   done
+  for s in ${SERVICES}; do (load_service "$s" && service_validate) || return 1; done
   list_service_ports | check_port_collisions
 }
 
@@ -103,11 +104,11 @@ quay_json_to_digest() {
 }
 
 github_latest_version() {
-  curl -fsS --max-time 20 "https://api.github.com/repos/$1/releases/latest" | release_json_to_version
+  curl -fsS --retry 3 --max-time 20 "https://api.github.com/repos/$1/releases/latest" | release_json_to_version
 }
 
 quay_tag_digest() {
-  curl -fsS --max-time 20 "https://quay.io/api/v1/repository/${1#quay.io/}/tag/?specificTag=$2&onlyActiveTags=true" |
+  curl -fsS --retry 3 --max-time 20 "https://quay.io/api/v1/repository/${1#quay.io/}/tag/?specificTag=$2&onlyActiveTags=true" |
     quay_json_to_digest
 }
 
@@ -146,7 +147,11 @@ write_client_profile() {
 # --- gcloud / SSH -------------------------------------------------------------
 run_gcloud() { gcloud --project="${GCP_PROJECT}" --quiet "$@"; }
 
-gcp_ssh() { run_gcloud compute ssh "${VM_NAME}" --zone="${GCP_ZONE}" --tunnel-through-iap --command="$1"; }
+# Keepalives end a session whose IAP tunnel silently died, instead of hanging run_remote forever.
+gcp_ssh() {
+  run_gcloud compute ssh "${VM_NAME}" --zone="${GCP_ZONE}" --tunnel-through-iap \
+    --ssh-flag="-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4" --command="$1"
+}
 
 # run_remote SCRIPT VAR... — stream a VM-side script over stdin; run as root with VARs in env.
 run_remote() {
