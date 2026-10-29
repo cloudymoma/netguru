@@ -26,6 +26,7 @@ sb_fn() {
     : "${REALITY_PUBLIC_KEY:=$(awk '/PublicKey/{print $2}' <<<"$SB_KEYPAIR")}"
     : "${REALITY_SHORT_ID:=0123456789abcdef}"
     : "${HY2_PASSWORD:=00112233445566778899aabbccddeeff}"
+    : "${HY2_OBFS_PASSWORD:=ffeeddccbbaa99887766554433221100}"
     : "${HY2_CERT_SHA256:=ABCDEF}"
     HY2_CERT_PEM=$(cat "${SB_TMP}/hy2.crt")
     "$@"
@@ -44,6 +45,32 @@ expect_eq "private and link-local (metadata) destinations are rejected" \
 expect_eq "inbounds are REALITY on tcp 443 and Hysteria2 on 8443" \
   "$(jq -r '[.inbounds[] | "\(.type):\(.listen_port)"] | join(",")' "${SB_TMP}/server.json")" \
   "vless:443,hysteria2:8443"
+
+# Salamander (on by default): probes without the obfs password get no reply, so the self-signed cert never leaks.
+expect_eq "Hysteria2 obfuscates with Salamander by default" \
+  "$(jq -c '.inbounds[1].obfs' "${SB_TMP}/server.json")" \
+  '{"type":"salamander","password":"ffeeddccbbaa99887766554433221100"}'
+SINGBOX_HY2_SALAMANDER=false sb_fn "$SB_INSTALL" render_singbox_config >"${SB_TMP}/server-plain.json"
+expect_ok "Salamander off: config still passes 'sing-box check'" sing-box check -c "${SB_TMP}/server-plain.json"
+expect_eq "Salamander off: no obfs in the Hysteria2 inbound" \
+  "$(jq -c '.inbounds[1] | has("obfs")' "${SB_TMP}/server-plain.json")" "false"
+
+# Server logging defaults to warn: no per-connection lines (info and below record every client IP and destination).
+# It can be turned off entirely, or set to any level.
+expect_eq "server logging defaults to warn" "$(jq -c '.log' "${SB_TMP}/server.json")" '{"level":"warn"}'
+SINGBOX_LOG_ENABLED=false sb_fn "$SB_INSTALL" render_singbox_config >"${SB_TMP}/server-nolog.json"
+expect_ok "logging off: config still passes 'sing-box check'" sing-box check -c "${SB_TMP}/server-nolog.json"
+expect_eq "logging off: sing-box logging is disabled" "$(jq -c '.log' "${SB_TMP}/server-nolog.json")" '{"disabled":true}'
+SINGBOX_LOG_ENABLED=true SINGBOX_LOG_LEVEL=debug sb_fn "$SB_INSTALL" render_singbox_config >"${SB_TMP}/server-log.json"
+expect_ok "logging on: config still passes 'sing-box check'" sing-box check -c "${SB_TMP}/server-log.json"
+expect_eq "logging on: the configured level is used" "$(jq -c '.log' "${SB_TMP}/server-log.json")" '{"level":"debug"}'
+# shellcheck disable=SC2016 # $l is expanded by the inner bash
+expect_ok   "every sing-box log level is accepted" \
+  bash -c '. gcp/lib.sh; load_service sing-box; for l in trace debug info warn error fatal panic; do SINGBOX_LOG_LEVEL=$l service_validate; done'
+expect_fail "an unknown log level is rejected" \
+  bash -c '. gcp/lib.sh; SINGBOX_LOG_LEVEL=verbose; load_service sing-box; service_validate'
+expect_fail "SINGBOX_LOG_ENABLED must be true or false" \
+  bash -c '. gcp/lib.sh; SINGBOX_LOG_ENABLED=on; load_service sing-box; service_validate'
 
 expect_eq "restart when config changed"        "$(vm_fn "$SB_INSTALL" needs_restart yes no yes)" "yes"
 expect_eq "restart when package upgraded"      "$(vm_fn "$SB_INSTALL" needs_restart no yes yes)" "yes"
@@ -102,6 +129,28 @@ sb_end_state() {
 expect_ok   "health check waits for the ports to bind after systemd reports active"  vm_fn "$SB_INSTALL" sb_end_state 3
 expect_fail "health check fails when the ports never bind"                          vm_fn "$SB_INSTALL" sb_end_state 0
 
+# SINGBOX_ENABLED=false: make infra stops sing-box and disables it at boot, keeping /etc/sing-box (credentials).
+# sb_disable STATE — remote-disable main against a stubbed systemctl; prints its mutating calls. STATE: absent|running|stopped
+SB_DISABLE=gcp/services/sing-box/remote-disable.sh
+# shellcheck disable=SC2329 # stub invoked by the sourced main
+sb_disable() {
+  local state=$1 log="${SB_TMP}/disable-log"
+  : >"$log"
+  systemctl() {
+    case "$1" in
+      cat) [[ "$state" != absent ]] ;;
+      is-enabled | is-active) [[ "$state" == running ]] ;;
+      *) echo "$*" >>"$log" ;;
+    esac
+  }
+  main
+  cat "$log"
+}
+expect_eq "turning sing-box off stops it and disables it at boot" \
+  "$(vm_fn "$SB_DISABLE" sb_disable running 2>/dev/null)" "disable --now sing-box"
+expect_eq "an already stopped sing-box is left alone" "$(vm_fn "$SB_DISABLE" sb_disable stopped 2>/dev/null)" ""
+expect_eq "no sing-box installed: nothing to do"      "$(vm_fn "$SB_DISABLE" sb_disable absent 2>/dev/null)" ""
+
 # Credentials are generated once and reused forever: a file with a missing value must never be persisted.
 # shellcheck disable=SC2034,SC2329 # globals and the sing-box stub are used by the sourced ensure_credentials
 sb_creds() {
@@ -116,9 +165,24 @@ sb_creds() {
 }
 expect_ok   "credentials are generated when absent"                    vm_fn "$SB_INSTALL" sb_creds no
 expect_eq   "generated credentials are complete and owner-only" \
-  "$(stat -c %a "${SB_TMP}/etc-no/credentials.env"),$(grep -c '^[A-Z0-9_]*=.' "${SB_TMP}/etc-no/credentials.env")" "600,5"
+  "$(stat -c %a "${SB_TMP}/etc-no/credentials.env"),$(grep -c '^[A-Z0-9_]*=.' "${SB_TMP}/etc-no/credentials.env")" "600,6"
 expect_fail "a failed generator step stops the install"                vm_fn "$SB_INSTALL" sb_creds yes
 expect_fail "a failed generator step persists no credentials file"     test -e "${SB_TMP}/etc-yes/credentials.env"
+
+# VMs installed before Salamander get only the obfs password added; the values clients already have never change.
+# shellcheck disable=SC2034 # read by the sourced ensure_credentials
+sb_creds_old() { ETC="${SB_TMP}/etc-old"; CREDS="${ETC}/credentials.env"; ensure_credentials; }
+mkdir -p "${SB_TMP}/etc-old"
+grep -v '^HY2_OBFS_PASSWORD=' "${SB_TMP}/etc-no/credentials.env" >"${SB_TMP}/etc-old/credentials.env"
+chmod 600 "${SB_TMP}/etc-old/credentials.env"
+cp "${SB_TMP}/etc-old/credentials.env" "${SB_TMP}/creds-before"
+expect_ok   "pre-Salamander credentials are accepted"                  vm_fn "$SB_INSTALL" sb_creds_old
+expect_eq   "existing credential values are kept as they were" \
+  "$(grep -v '^HY2_OBFS_PASSWORD=' "${SB_TMP}/etc-old/credentials.env")" "$(cat "${SB_TMP}/creds-before")"
+expect_ok   "re-running keeps the added obfs password"                 vm_fn "$SB_INSTALL" sb_creds_old
+expect_eq   "exactly one obfs password is added, owner-only" \
+  "$(grep -c '^HY2_OBFS_PASSWORD=[0-9a-f]\{32\}$' "${SB_TMP}/etc-old/credentials.env"),$(stat -c %a "${SB_TMP}/etc-old/credentials.env")" \
+  "1,600"
 
 # Clients verify the Hysteria2 cert against SINGBOX_HY2_SNI (JSON profile) and pin its hash (URI): keep it while
 # the SNI is unchanged, replace it when the SNI changes.
@@ -136,8 +200,11 @@ expect_ok "a changed SNI gets a cert valid for the new name" \
 expect_eq "VLESS-REALITY share URI" \
   "$(REALITY_PUBLIC_KEY=PUBKEY sb_fn "$SB_SHOW" vless_uri)" \
   "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.yahoo.co.jp&fp=chrome&pbk=PUBKEY&sid=0123456789abcdef&type=tcp&headerType=none#netguru-reality"
-expect_eq "Hysteria2 share URI carries the cert pin" \
+expect_eq "Hysteria2 share URI carries the Salamander password and the cert pin" \
   "$(sb_fn "$SB_SHOW" hy2_uri)" \
+  "hysteria2://00112233445566778899aabbccddeeff@1.2.3.4:8443?obfs=salamander&obfs-password=ffeeddccbbaa99887766554433221100&sni=www.yahoo.co.jp&alpn=h3&insecure=1&pinSHA256=ABCDEF#netguru-hy2"
+expect_eq "Salamander off: the share URI has no obfs" \
+  "$(SINGBOX_HY2_SALAMANDER=false sb_fn "$SB_SHOW" hy2_uri)" \
   "hysteria2://00112233445566778899aabbccddeeff@1.2.3.4:8443?sni=www.yahoo.co.jp&alpn=h3&insecure=1&pinSHA256=ABCDEF#netguru-hy2"
 
 sb_fn "$SB_SHOW" client_outbounds >"${SB_TMP}/outbounds.json"
@@ -149,6 +216,19 @@ expect_eq "Hysteria2 client trusts only the pinned cert, never insecure" \
 expect_eq "REALITY client uses chrome uTLS and the server public key" \
   "$(jq -r '.[0].tls | [.utls.fingerprint, (.reality.public_key | length > 0)] | map(tostring) | join(",")' "${SB_TMP}/outbounds.json")" \
   "chrome,true"
+expect_eq "Hysteria2 client uses the server's Salamander password" \
+  "$(jq -c '.[1].obfs' "${SB_TMP}/outbounds.json")" \
+  '{"type":"salamander","password":"ffeeddccbbaa99887766554433221100"}'
+expect_eq "Salamander off: the Hysteria2 client has no obfs" \
+  "$(SINGBOX_HY2_SALAMANDER=false sb_fn "$SB_SHOW" client_outbounds | jq -c '.[1] | has("obfs")')" "false"
+
+# A VM whose credentials predate Salamander (not redeployed yet) must not get a client config that cannot connect.
+mkdir -p "${SB_TMP}/show-etc/certs"
+grep -v '^HY2_OBFS_PASSWORD=' "${SB_TMP}/etc-no/credentials.env" >"${SB_TMP}/show-etc/credentials.env"
+cp "${SB_TMP}/hy2.crt" "${SB_TMP}/show-etc/certs/hy2.crt"
+# shellcheck disable=SC2034 # read by the sourced main
+sb_show_old() { ETC="${SB_TMP}/show-etc"; SHOW_FORMAT=json; STATIC_IP=1.2.3.4; main; }
+expect_fail "show refuses Salamander until the VM has an obfs password" vm_fn "$SB_SHOW" sb_show_old
 
 # make show prints a whole profile that the sing-box apps accept as pasted; a bare outbounds array is rejected by them.
 vm_fn "$OUTLINE_SHOW" keys_to_outbounds 1.2.3.4 <"${FIXTURES}/outline-access-keys.json" |

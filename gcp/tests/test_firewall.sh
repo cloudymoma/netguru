@@ -28,7 +28,8 @@ expect_eq "wrong target tag is reported" \
   "$(NETWORK_TAG=other firewall_rule_diff "$(fw fw-outline.json)" 0.0.0.0/0 tcp:45362,udp:45362)" \
   "target-tags"
 
-# Rule names come from the tag, so a renamed VM can never reuse another VM's rule.
+# Rule names come from the tag, so a renamed VM can never reuse another VM's rule. Turned-off services' rules stay
+# managed, so infra can delete them.
 expect_eq "managed rule names derive from NETWORK_TAG" \
   "$(managed_fw_rules | tr '\n' ' ')" \
   "netguru-server-ssh-iap netguru-server-outline netguru-server-sing-box "
@@ -39,3 +40,24 @@ expect_eq "unmanaged rule on our network is reported, other networks ignored" \
 expect_eq "only managed rules: nothing reported" \
   "$(foreign_fw_rules "$(fw fw-list.json | jq 'map(select(.name != "netguru-server-open-all"))')")" \
   ""
+
+# A turned-off service's rule is deleted, but only on netguru's network: a same-named rule elsewhere isn't ours.
+# fw_remove EXISTS NETWORK — remove_service_firewall outline against a stubbed gcloud; prints its mutations.
+# shellcheck disable=SC2329 # stubs invoked by remove_service_firewall in lib.sh
+fw_remove() {
+  local exists=$1 rule_network=$2 # not "network": remove_service_firewall's local of that name would shadow it
+  gcloud_resource_exists() { [[ "$exists" == yes ]]; }
+  run_gcloud() {
+    if [[ " $* " == *" describe "* ]]; then
+      fw fw-outline.json | jq --arg n "$rule_network" '.network = "projects/p/global/networks/\($n)"'
+    else
+      echo "$*"
+    fi
+  }
+  remove_service_firewall outline
+}
+expect_eq   "a turned-off service's rule is deleted" \
+  "$(fw_remove yes netguru-net 2>/dev/null)" "compute firewall-rules delete netguru-server-outline"
+expect_eq   "no rule: nothing to delete"                         "$(fw_remove no netguru-net 2>/dev/null)" ""
+expect_fail "a same-named rule on another network is refused"    fw_remove yes default
+expect_eq   "a same-named rule on another network is never deleted" "$(fw_remove yes default 2>/dev/null)" ""

@@ -60,10 +60,25 @@ metadata_blocked() {
 tcp_open() { nc -z -w 5 "${STATIC_IP}" "$1" 2>/dev/null; }
 tcp_closed() { ! tcp_open "$1"; }
 
+# What an active scanner sees. REALITY hands non-clients to the real site, so a plain TLS client must get a chain
+# that validates for the SNI; with Salamander, a Hysteria2 client without the obfs password must get nothing at all.
+reality_fallback_genuine() {
+  curl -sS -o /dev/null --max-time 15 --tlsv1.3 \
+    --resolve "${SINGBOX_REALITY_SNI}:${SINGBOX_REALITY_PORT}:${STATIC_IP}" \
+    "https://${SINGBOX_REALITY_SNI}:${SINGBOX_REALITY_PORT}/" 2>/dev/null
+}
+egress_blocked() { ! curl -sS -o /dev/null --max-time 8 -x "socks5h://127.0.0.1:${PROXY_PORT}" https://api.ipify.org 2>/dev/null; }
+
 fw_matches() {
   local actual
   actual=$(run_gcloud compute firewall-rules describe "$1" --format=json 2>/dev/null) || return 1
   [[ -z "$(firewall_rule_diff "$actual" "$2" "$3")" ]]
+}
+
+# rule_absent NAME — true if NETWORK_NAME has no firewall rule called NAME (reads $rules, the rules list)
+rule_absent() {
+  jq -e --arg name "$1" --arg network "${NETWORK_NAME}" \
+    'any(.[]; .name == $name and (.network | split("/") | last) == $network) | not' <<<"$rules" >/dev/null
 }
 
 echo "== tunnels via ${STATIC_IP}"
@@ -85,6 +100,17 @@ while IFS= read -r ob; do
   stop_proxy
 done < <(jq -c '.[]' <<<"$outbounds")
 
+if service_enabled sing-box; then
+  echo "== what an active scanner sees"
+  check "tcp/${SINGBOX_REALITY_PORT}: plain TLS gets the genuine ${SINGBOX_REALITY_SNI} certificate" reality_fallback_genuine
+  hy2=$(jq -c '.[] | select(.type == "hysteria2" and .obfs.type == "salamander")' <<<"$outbounds")
+  if [[ -n "$hy2" ]]; then
+    start_proxy "$(jq -c 'del(.obfs)' <<<"$hy2")"
+    check "udp/${SINGBOX_HY2_PORT}: Hysteria2 without the Salamander password gets nothing" egress_blocked
+    stop_proxy
+  fi
+fi
+
 echo "== exposure (from this workstation)"
 for p in $(list_service_ports | awk '{print $2}' | sed -n 's/^tcp://p'); do
   check "tcp/${p} open" tcp_open "$p"
@@ -103,7 +129,12 @@ for s in ${SERVICES}; do
   rule_ports=$(load_service "$s" && echo "${FW_RULES}")
   check "${rule} matches spec" fw_matches "$rule" 0.0.0.0/0 "$rule_ports"
 done
-foreign=$(foreign_fw_rules "$(run_gcloud compute firewall-rules list --format=json)")
+rules=$(run_gcloud compute firewall-rules list --format=json)
+for s in $(disabled_services); do
+  rule=$(fw_rule_name "$s")
+  check "${rule} absent (${s} is turned off)" rule_absent "$rule"
+done
+foreign=$(foreign_fw_rules "$rules")
 check "${NETWORK_NAME} has no other firewall rules${foreign:+ (found: ${foreign})}" test -z "$foreign"
 
 ((FAILED == 0)) || die "verification failed (see FAIL lines above)"

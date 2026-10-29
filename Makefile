@@ -1,8 +1,10 @@
 # netguru — secure multi-VPN on one GCP VM.
 SHELL := /bin/bash
 .NOTPARALLEL:
-SERVICES := $(shell . gcp/config.env && echo $$SERVICES)
-.PHONY: help all infra $(SERVICES) upgrade $(addprefix upgrade-,$(SERVICES)) show verify update-ip test
+# Enabled services in deploy order, as gcp/lib.sh derives them from the *_ENABLED switches in gcp/config.env.
+SERVICES := $(shell bash -c '. gcp/lib.sh && echo "$$SERVICES"')
+OFF_SERVICES := $(filter-out $(SERVICES),$(notdir $(patsubst %/service.env,%,$(wildcard gcp/services/*/service.env))))
+.PHONY: help all infra $(SERVICES) $(OFF_SERVICES) upgrade $(addprefix upgrade-,$(SERVICES) $(OFF_SERVICES)) show verify update-ip test
 
 help:
 	@printf '%s\n' \
@@ -10,12 +12,12 @@ help:
 	  '' \
 	  'Targets:' \
 	  '  help                 Show this help message (default)' \
-	  '  all                  Ensure infra, deploy all services, and show client configs' \
-	  '  infra                Ensure VPC, subnet, firewall rules, static IP, VM, and SSH over IAP' \
-	  '  outline              Ensure infra and deploy Outline' \
-	  '  sing-box             Ensure infra and deploy sing-box (VLESS-REALITY + Hysteria2)' \
-	  '  upgrade              Upgrade all services to their latest upstream image/release' \
-	  '  upgrade-outline      Upgrade Outline shadowbox container to the latest stable digest' \
+	  '  all                  Ensure infra, deploy enabled services, and show client configs' \
+	  '  infra                Ensure VPC, subnet, firewall rules, static IP, VM, SSH over IAP; stop turned-off services' \
+	  '  outline              Ensure infra and deploy Outline (only when OUTLINE_ENABLED=true)' \
+	  '  sing-box             Ensure infra and deploy sing-box: VLESS-REALITY + Hysteria2 (when SINGBOX_ENABLED=true)' \
+	  '  upgrade              Upgrade all enabled services to their latest upstream image/release' \
+	  '  upgrade-outline      Upgrade Outline shadowbox container to the latest stable digest (when enabled)' \
 	  '  upgrade-sing-box     Upgrade sing-box package to SINGBOX_VERSION (latest by default)' \
 	  '  show                 Print client URIs/keys and write netguru-client.json (contains secrets)' \
 	  '  verify               Run end-to-end tunnel, metadata-blocking, port, and firewall checks' \
@@ -29,6 +31,12 @@ infra:
 
 $(SERVICES): infra
 	gcp/deploy.sh $@
+
+# A turned-off service: deploy.sh refuses and names the switch to set, before infra or any GCP call.
+ifneq ($(OFF_SERVICES),)
+$(OFF_SERVICES) $(addprefix upgrade-,$(OFF_SERVICES)):
+	@gcp/deploy.sh $(patsubst upgrade-%,%,$@)
+endif
 
 upgrade: $(addprefix upgrade-,$(SERVICES))
 

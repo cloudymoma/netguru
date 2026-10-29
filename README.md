@@ -1,7 +1,7 @@
 # netguru
 
-Outline and sing-box (VLESS-REALITY on tcp/443, Hysteria2 on udp/8443) on one locked-down Google Cloud VM,
-deployed and checked with `make`.
+sing-box (VLESS-REALITY on tcp/443, Hysteria2 with Salamander obfuscation on udp/8443) on one locked-down Google
+Cloud VM, deployed and checked with `make`. Outline (Shadowsocks) is optional and off by default.
 
 ## What it creates
 
@@ -11,8 +11,8 @@ With the defaults in [`gcp/config.env`](gcp/config.env), in one project:
 |---|---|---|
 | VPC and subnet | `netguru-net` | subnet `10.10.0.0/24`; nothing else runs in it |
 | Firewall rules | `netguru-server-ssh-iap` | tcp:22 from IAP only, see [SSH access](#ssh-access-and-iap_source_range) |
-| | `netguru-server-outline` | tcp and udp 45362 from anywhere |
 | | `netguru-server-sing-box` | tcp 443 and udp 8443 from anywhere |
+| | `netguru-server-outline` | tcp and udp 45362 from anywhere; only while `OUTLINE_ENABLED=true` |
 | Static IP | `netguru-jp-ip` | the address clients connect to |
 | VM | `netguru-server` | e2-small, Debian 12, 10 GB pd-balanced disk; no service account, Secure Boot, OS Login, deletion protection |
 
@@ -21,7 +21,7 @@ billable (about US$21/month in asia-northeast1 at the time of writing), plus int
 
 ## Prerequisites
 
-- **Workstation:** bash, make, `gcloud` (logged in with `gcloud auth login`), jq, curl, nc, and
+- **Workstation:** bash, make, `gcloud` (logged in with `gcloud auth login`), jq, curl, nc, python3, and
   [sing-box](https://github.com/SagerNet/sing-box/releases) on `PATH` (tested with 1.14.2; `make verify` and
   `make test` use it). `make test` also needs shellcheck, openssl and gpg.
 - **Project:** billing enabled and the Compute Engine API on:
@@ -38,7 +38,23 @@ Edit [`gcp/config.env`](gcp/config.env):
   well-known site near the new region that serves TLS 1.3 and HTTP/2 and isn't a commonly abused default such as
   `www.apple.com`. The installer checks TLS 1.3 and HTTP/2 and stops if either is missing.
 - `VM_NAME`, `NETWORK_NAME`, `NETWORK_TAG`, `STATIC_IP_NAME`: change only if they clash with existing resources.
-- Ports: any free ports. `tcp:22` is reserved for SSH, and collisions are rejected.
+- `OUTLINE_ENABLED`, `SINGBOX_ENABLED`: one switch per service. Outline is off by default: its Shadowsocks traffic is
+  easy for censors to fingerprint, and a block of the VM's IP also cuts off REALITY and Hysteria2. Turning a service
+  off on a deployed VM makes `make all` (or `make infra`) delete its firewall rule and stop it; its keys and
+  credentials stay on the VM (`/opt/outline`, `/etc/sing-box`), so turning it back on restores the same client
+  configs.
+- `SINGBOX_HY2_SALAMANDER`: `true` by default. Every Hysteria2 packet is obfuscated, so a probe without the obfs
+  password gets no reply and never sees the server's self-signed certificate. Every Hysteria2 client needs
+  Salamander support and the obfs password (both are in the `make show` output); set `false` only for a client
+  without it. Switching it changes the Hysteria2 client config, so re-import it from `make show`. The cost is CPU:
+  Hysteria2 traffic takes about 3x the server CPU and 2x the client CPU per GB (REALITY is unaffected).
+- `SINGBOX_LOG_ENABLED`, `SINGBOX_LOG_LEVEL`: sing-box server logging, on at `warn` by default. At `warn`, users'
+  connections aren't logged; failed lookups and dials log the destination without the client IP, and every
+  unauthenticated probe of the REALITY port logs one line with the prober's IP, which shows active probing. `info`,
+  `debug` and `trace` log every connection with the client IP and destination, so use them only briefly while
+  troubleshooting. Startup failures are reported (and shown by `make all`) even with logging off.
+- Ports: any free ports, without leading zeros. `tcp:22` is reserved for SSH, and collisions are rejected.
+  `OUTLINE_KEYS_PORT` can't be changed once Outline is installed: its existing keys stay on the old port.
 - `OUTLINE_INSTALLER_URL`, `OUTLINE_INSTALLER_SHA256`, `SINGBOX_GPG_FINGERPRINT`: authenticity pins. Change them
   only after verifying the new values independently.
 - `IAP_SOURCE_RANGE`: leave as is, see [below](#ssh-access-and-iap_source_range).
@@ -49,14 +65,18 @@ Edit [`gcp/config.env`](gcp/config.env):
 |---|---|
 | `make` / `make help` | list available targets |
 | `make test` | shellcheck and offline unit tests; no GCP access |
-| `make all` | create or reconcile the infrastructure, install or adopt each service, then `make show`; safe to re-run |
-| `make show` | print Outline `ss://` keys and `vless://` / `hysteria2://` URIs; write a sing-box profile for SFI/SFA/SFM to `netguru-client.json` (mode 600, git-ignored). **Contains secrets.** |
-| `make verify` | end-to-end check from your workstation: each tunnel, blocked metadata server, open and closed ports, VM and firewall settings |
-| `make upgrade` | move Outline to the current `stable` image and sing-box to `SINGBOX_VERSION` (latest by default); a no-op when current |
-| `make update-ip CONFIRM=1` | give the VM a new public IP; every client config changes |
+| `make all` | create or reconcile the infrastructure, install or adopt each enabled service, stop turned-off ones, then `make show`; safe to re-run |
+| `make show` | print `vless://` / `hysteria2://` URIs (plus Outline `ss://` keys when enabled); write a sing-box profile for SFI/SFA/SFM to `netguru-client.json` (mode 600, git-ignored), replaced only when every service answered. **Contains secrets.** |
+| `make verify` | end-to-end check from your workstation: each tunnel, blocked metadata server, open and closed ports, what an active scanner sees (the real site's certificate on the REALITY port; silence from Hysteria2 without the Salamander password), VM and firewall settings, and no rules left for turned-off services |
+| `make upgrade` | move sing-box to `SINGBOX_VERSION` (latest by default) and, when enabled, Outline to the current `stable` image; a no-op when current |
+| `make update-ip CONFIRM=1` | give the VM a new public IP; every client config changes. If the final re-sync fails, finish with `make all`: re-running `update-ip` would rotate again |
 
-`make infra` runs only the infrastructure step; `make outline` and `make sing-box` run it plus one service;
-`make upgrade-outline` and `make upgrade-sing-box` upgrade one service.
+`make infra` runs only the infrastructure step; `make sing-box` and `make outline` run it plus one service, and
+`make upgrade-sing-box` and `make upgrade-outline` upgrade one service. For a turned-off service these targets stop at
+once and name the switch to set.
+
+Server logs (with the default `warn` level, mostly probes of the REALITY port):
+`gcloud compute ssh netguru-server --zone=asia-northeast1-a --tunnel-through-iap --command='sudo journalctl -u sing-box --since -1d'`.
 
 ## SSH access and `IAP_SOURCE_RANGE`
 

@@ -6,7 +6,12 @@ set -euo pipefail
 
 svc=${1:-}
 [[ -n "$svc" ]] || die "usage: deploy.sh <service>"
-service_enabled "$svc" || die "service '${svc}' is not in SERVICES (${SERVICES})"
+if ! service_enabled "$svc"; then
+  if [[ -f "${GCP_DIR}/services/${svc}/service.env" ]]; then
+    die "service '${svc}' is turned off: set $(service_switch "$svc")=true in gcp/config.env"
+  fi
+  die "unknown service '${svc}' (known: $(known_services | tr '\n' ' ' | sed 's/ $//'))"
+fi
 UPGRADE=${UPGRADE:-no}
 [[ "$UPGRADE" == yes || "$UPGRADE" == no ]] || die "UPGRADE must be yes or no (got '${UPGRADE}')"
 validate_config

@@ -9,6 +9,9 @@ expect_fail "port 0 is rejected"              require_port P 0
 expect_fail "port 65536 is rejected"          require_port P 65536
 expect_fail "non-numeric port is rejected"    require_port P 44a
 expect_fail "empty port is rejected"          require_port P ""
+expect_fail "zero-padded port is rejected (bash reads it as octal)" require_port P 0443
+expect_fail "zero-padded 22 cannot slip past the SSH guard"         require_port P 00022
+expect_fail "port 08 is rejected, not an arithmetic error"          require_port P 08
 
 expect_ok   "IPv4 accepted"                   require_ipv4 IP 203.0.113.100
 expect_fail "octet >255 rejected"             require_ipv4 IP 203.0.113.256

@@ -15,7 +15,9 @@ require_not_tbd() {
   [[ -n "$2" && "$2" != *"<TBD"* ]] || die "$1 is not set (got '$2')"
 }
 require_port() {
-  if ! [[ "$2" =~ ^[0-9]{1,5}$ ]] || (($2 < 1 || $2 > 65535)); then
+  # No leading zeros: bash would read 0443 as octal 291 while gcloud and jq use 443, and 00022 would slip past the
+  # string-based tcp:22 guard.
+  if ! [[ "$2" =~ ^[1-9][0-9]{0,4}$ ]] || ((10#$2 > 65535)); then
     die "$1 must be a port 1-65535 (got '$2')"
   fi
 }
@@ -39,6 +41,38 @@ require_bool() {
 
 # --- service modules (spec §4.4) --------------------------------------------
 service_enabled() { [[ " ${SERVICES} " == *" $1 "* ]]; }
+
+# known_services -> every service module under gcp/services, turned on or off
+known_services() {
+  local f
+  for f in "${GCP_DIR}"/services/*/service.env; do
+    [[ -f "$f" ]] || continue
+    f=${f%/service.env}
+    echo "${f##*/}"
+  done
+}
+
+# disabled_services -> known service modules that config.env turns off (not in SERVICES)
+disabled_services() {
+  local s
+  for s in $(known_services); do service_enabled "$s" || echo "$s"; done
+}
+
+# service_switch NAME -> NAME's on/off variable in config.env: upper-cased, dashes dropped (sing-box -> SINGBOX_ENABLED)
+service_switch() { printf '%s_ENABLED\n' "$(tr -d '-' <<<"$1" | tr '[:lower:]' '[:upper:]')"; }
+
+# enabled_services -> the known services whose switch is true, space-separated, in deploy (alphabetical) order
+enabled_services() {
+  local s v list=""
+  for s in $(known_services); do
+    v=$(service_switch "$s")
+    if [[ "${!v:-}" == true ]]; then list+="${list:+ }${s}"; fi
+  done
+  echo "$list"
+}
+
+# Enabled services, in deploy order: the single source for every script and the Makefile.
+SERVICES=$(enabled_services)
 
 load_service() {
   SERVICE_DIR="${GCP_DIR}/services/$1"
@@ -81,9 +115,14 @@ build_remote_cmd() {
 
 validate_config() {
   local v s
-  for v in GCP_PROJECT GCP_REGION GCP_ZONE VM_NAME NETWORK_NAME SUBNET_RANGE NETWORK_TAG STATIC_IP_NAME IAP_SOURCE_RANGE SERVICES; do
+  for v in GCP_PROJECT GCP_REGION GCP_ZONE VM_NAME NETWORK_NAME SUBNET_RANGE NETWORK_TAG STATIC_IP_NAME IAP_SOURCE_RANGE; do
     require_not_tbd "$v" "${!v}"
   done
+  for s in $(known_services); do
+    v=$(service_switch "$s")
+    require_bool "$v" "${!v:-}"
+  done
+  [[ -n "${SERVICES}" ]] || die "no service is enabled: set at least one *_ENABLED switch in gcp/config.env to true"
   for s in ${SERVICES}; do (load_service "$s" && service_validate) || return 1; done
   list_service_ports | check_port_collisions
 }
@@ -160,6 +199,17 @@ run_remote() {
   gcp_ssh "$(build_remote_cmd "$@")" <"$script"
 }
 
+# retire_disabled_services — run each turned-off service's VM-side remote-disable.sh (stops it, keeps its data)
+retire_disabled_services() {
+  local s script
+  for s in $(disabled_services); do
+    script="${GCP_DIR}/services/${s}/remote-disable.sh"
+    [[ -f "$script" ]] || continue
+    log "making sure ${s} is stopped on ${VM_NAME} (turned off in config.env)"
+    run_remote "$script"
+  done
+}
+
 wait_for_ssh() {
   local i
   for i in $(seq 1 30); do
@@ -184,11 +234,12 @@ FW_PRIORITY=1000
 
 fw_rule_name() { echo "${NETWORK_TAG}-$1"; }
 
-# managed_fw_rules -> every firewall rule name netguru manages, one per line
+# managed_fw_rules -> every firewall rule name netguru manages, one per line. A turned-off service's rule stays
+# managed, so infra deletes it instead of refusing the network over it.
 managed_fw_rules() {
   local s
   fw_rule_name ssh-iap
-  for s in ${SERVICES}; do fw_rule_name "$s"; done
+  for s in $(known_services); do fw_rule_name "$s"; done
 }
 
 # foreign_fw_rules RULES_JSON (firewall-rules list) -> ", "-joined rules on NETWORK_NAME that netguru does not manage
@@ -248,11 +299,24 @@ ensure_service_firewall() {
   (load_service "$1" && ensure_firewall_rule "$(fw_rule_name "$1")" 0.0.0.0/0 "${FW_RULES}")
 }
 
+# remove_service_firewall SERVICE — a turned-off service exposes nothing: delete its rule, only on NETWORK_NAME
+remove_service_firewall() {
+  local name network
+  name=$(fw_rule_name "$1")
+  gcloud_resource_exists compute firewall-rules describe "$name" || return 0
+  network=$(run_gcloud compute firewall-rules describe "$name" --format=json | jq -r '.network | split("/") | last')
+  [[ "$network" == "${NETWORK_NAME}" ]] ||
+    die "firewall rule ${name} is on network ${network}, not ${NETWORK_NAME}; refusing to delete it"
+  log "deleting firewall rule ${name} (${1} is turned off)"
+  run_gcloud compute firewall-rules delete "$name"
+}
+
 ensure_base_firewall() {
   run_gcloud services enable iap.googleapis.com
   ensure_firewall_rule "$(fw_rule_name ssh-iap)" "${IAP_SOURCE_RANGE}" tcp:22
   local s
   for s in ${SERVICES}; do ensure_service_firewall "$s"; done
+  for s in $(disabled_services); do remove_service_firewall "$s"; done
 }
 
 # --- network (spec §4.7) ------------------------------------------------------

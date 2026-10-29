@@ -21,7 +21,9 @@ show_service() {
 }
 
 all_outbounds() {
-  for s in ${SERVICES}; do (show_service "$s" json); done | jq -s 'add'
+  local s
+  # `|| exit 1`: one failed SSH must fail the whole list, never yield a list missing that service's servers.
+  for s in ${SERVICES}; do (show_service "$s" json) || exit 1; done | jq -s 'add'
 }
 
 if [[ "$SHOW_FORMAT" == json ]]; then
@@ -35,7 +37,8 @@ for s in ${SERVICES}; do
   echo "== ${s}"
   (show_service "$s" text)
 done
-all_outbounds | write_client_profile "${PROFILE_FILE}"
+outbounds=$(all_outbounds) # all services or nothing: a partial profile would silently drop servers
+write_client_profile "${PROFILE_FILE}" <<<"$outbounds"
 echo
 echo "== sing-box client profile (SFI/SFA/SFM; contains secrets): ${PROFILE_FILE}"
 echo "   Import it: Profiles → New Profile → Local → Import, or paste it into Edit Content"

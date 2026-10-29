@@ -97,4 +97,55 @@ expect_ok   "apt_update succeeds once the lists lock clears" vm_fn "$OUTLINE_INS
 expect_eq   "apt_update stops retrying after success"        "$(wc -l <"${OUTLINE_TMP}/apt-tries")" "3"
 expect_fail "apt_update dies after 12 failed attempts"       vm_fn "$OUTLINE_INSTALL" outline_apt_update 0
 expect_eq   "apt_update tries 12 times before dying"         "$(wc -l <"${OUTLINE_TMP}/apt-tries")" "12"
+
+# OUTLINE_ENABLED=false: make infra stops shadowbox for good (restart=no survives reboots) but keeps its keys.
+OUTLINE_DISABLE=gcp/services/outline/remote-disable.sh
+# outline_disable STATE — remote-disable main against a stubbed Docker; prints the mutating docker calls.
+# STATE: nodocker | nodaemon | absent | running | stopped
+# shellcheck disable=SC2329 # stubs invoked by the sourced main
+outline_disable() {
+  local state=$1 log="${OUTLINE_TMP}/disable-log"
+  : >"$log"
+  have_docker() { [[ "$state" != nodocker ]]; }
+  docker() {
+    case "$1" in
+      info) [[ "$state" != nodaemon ]] ;;
+      inspect)
+        if [[ "$2" != -f ]]; then [[ "$2" == shadowbox && "$state" != absent ]]
+        elif [[ "$state" == running ]]; then echo true
+        else echo false
+        fi ;;
+      *) echo "$*" >>"$log" ;;
+    esac
+  }
+  main
+  cat "$log"
+}
+expect_eq   "turning Outline off stops a running shadowbox for good" \
+  "$(vm_fn "$OUTLINE_DISABLE" outline_disable running 2>/dev/null)" $'update --restart=no shadowbox\nstop shadowbox'
+expect_eq   "an already stopped shadowbox only loses restart=always" \
+  "$(vm_fn "$OUTLINE_DISABLE" outline_disable stopped 2>/dev/null)" "update --restart=no shadowbox"
+expect_eq   "no shadowbox container: nothing to do" "$(vm_fn "$OUTLINE_DISABLE" outline_disable absent 2>/dev/null)" ""
+expect_ok   "no Docker at all: nothing to do"       vm_fn "$OUTLINE_DISABLE" outline_disable nodocker
+expect_fail "Docker installed but not running: refuses to guess" vm_fn "$OUTLINE_DISABLE" outline_disable nodaemon
+
+# Turning Outline back on adopts the stopped container: restart=always is restored before it starts.
+# shellcheck disable=SC2034,SC2329 # globals and stubs are used by the sourced adopt
+outline_adopt_stopped() {
+  local log="${OUTLINE_TMP}/adopt-log"
+  : >"$log"
+  STATIC_IP=203.0.113.100
+  docker() {
+    echo "$*" >>"$log"
+    if [[ "$1 $2" == "inspect -f" ]]; then echo false; fi
+    return 0
+  }
+  load_api() { :; }
+  wait_healthy() { :; }
+  api() { echo '{"hostnameForAccessKeys":"203.0.113.100"}'; }
+  adopt
+  grep -E '^(update|start) ' "$log"
+}
+expect_eq   "adopting a turned-off Outline restores restart=always, then starts it" \
+  "$(vm_fn "$OUTLINE_INSTALL" outline_adopt_stopped 2>/dev/null)" $'update --restart=always shadowbox\nstart shadowbox'
 rm -rf "$OUTLINE_TMP"

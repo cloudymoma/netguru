@@ -2,7 +2,7 @@
 # VM-side (root): install and configure official sing-box — VLESS-REALITY + Hysteria2 (spec §4.6).
 # Env: STATIC_IP UPGRADE(yes|no) SINGBOX_VERSION(latest|X.Y.Z) SINGBOX_TARGET_VERSION (resolved on the workstation, spec §4.10)
 #      SINGBOX_GPG_FINGERPRINT SINGBOX_REALITY_PORT SINGBOX_REALITY_SNI
-#      SINGBOX_HY2_PORT SINGBOX_HY2_SNI SINGBOX_ENABLE_BBR
+#      SINGBOX_HY2_PORT SINGBOX_HY2_SNI SINGBOX_HY2_SALAMANDER SINGBOX_ENABLE_BBR SINGBOX_LOG_ENABLED SINGBOX_LOG_LEVEL
 set -euo pipefail
 
 ETC=/etc/sing-box
@@ -122,11 +122,26 @@ check_reality_target() {
   [[ "$v" == 2 ]] || die "REALITY target ${SINGBOX_REALITY_SNI} must speak HTTP/2 over TLS 1.3 (got HTTP/${v})"
 }
 
+# add_missing_credential NAME — for a value introduced after this VM's first install: append a fresh random value
+# to the existing $CREDS (atomically), never changing the values clients already have.
+add_missing_credential() {
+  local name=$1 value tmp
+  grep -q "^${name}=." "$CREDS" && return 0
+  value=$(sing-box generate rand 16 --hex)
+  [[ "$value" =~ ^[0-9a-f]{32}$ ]] || die "could not generate ${name} (got '${value}')"
+  log "adding ${name} to existing credentials"
+  tmp=$(mktemp "${ETC}/.credentials.XXXXXX")
+  { cat "$CREDS"; echo "${name}=${value}"; } >"$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CREDS"
+}
+
 # A generated file is validated before it becomes $CREDS: once there, it is reused on every later deploy.
 ensure_credentials() {
   local src=$CREDS v
   if [[ -f "$CREDS" ]]; then
     log "reusing existing credentials"
+    add_missing_credential HY2_OBFS_PASSWORD
   else
     log "generating credentials"
     local kp tmp
@@ -138,13 +153,14 @@ ensure_credentials() {
       echo "REALITY_PUBLIC_KEY=$(awk '/PublicKey/{print $2}' <<<"$kp")"
       echo "REALITY_SHORT_ID=$(sing-box generate rand 8 --hex)"
       echo "HY2_PASSWORD=$(sing-box generate rand 16 --hex)"
+      echo "HY2_OBFS_PASSWORD=$(sing-box generate rand 16 --hex)"
     } >"$tmp"
     chmod 600 "$tmp"
     src=$tmp
   fi
   # shellcheck disable=SC1090
   . "$src"
-  for v in VLESS_UUID REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID HY2_PASSWORD; do
+  for v in VLESS_UUID REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID HY2_PASSWORD HY2_OBFS_PASSWORD; do
     [[ -n "${!v:-}" ]] || { [[ "$src" == "$CREDS" ]] || rm -f "$src"; die "${v} missing from ${src}"; }
   done
   [[ "$src" == "$CREDS" ]] || mv "$src" "$CREDS"
@@ -170,8 +186,10 @@ render_singbox_config() {
   jq -n --arg uuid "$VLESS_UUID" --arg priv "$REALITY_PRIVATE_KEY" --arg sid "$REALITY_SHORT_ID" \
     --arg sni "$SINGBOX_REALITY_SNI" --argjson rport "$SINGBOX_REALITY_PORT" \
     --arg pass "$HY2_PASSWORD" --argjson hport "$SINGBOX_HY2_PORT" \
+    --arg obfs "$HY2_OBFS_PASSWORD" --argjson salamander "$SINGBOX_HY2_SALAMANDER" \
+    --argjson log_on "$SINGBOX_LOG_ENABLED" --arg log_level "$SINGBOX_LOG_LEVEL" \
     --arg crt "${CERT_DIR}/hy2.crt" --arg key "${CERT_DIR}/hy2.key" '{
-    log: {level: "info"},
+    log: (if $log_on then {level: $log_level} else {disabled: true} end),
     dns: {servers: [{type: "local", tag: "local"}]},
     inbounds: [
       {type: "vless", tag: "vless-reality-in", listen: "::", listen_port: $rport,
@@ -179,9 +197,10 @@ render_singbox_config() {
        tls: {enabled: true, server_name: $sni,
              reality: {enabled: true, handshake: {server: $sni, server_port: 443},
                        private_key: $priv, short_id: [$sid]}}},
-      {type: "hysteria2", tag: "hysteria2-in", listen: "::", listen_port: $hport,
-       users: [{password: $pass}],
-       tls: {enabled: true, alpn: ["h3"], certificate_path: $crt, key_path: $key}}
+      ({type: "hysteria2", tag: "hysteria2-in", listen: "::", listen_port: $hport,
+        users: [{password: $pass}],
+        tls: {enabled: true, alpn: ["h3"], certificate_path: $crt, key_path: $key}}
+       + if $salamander then {obfs: {type: "salamander", password: $obfs}} else {} end)
     ],
     outbounds: [{type: "direct", tag: "direct"}],
     route: {

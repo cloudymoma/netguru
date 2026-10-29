@@ -65,5 +65,8 @@ fi
 
 [[ "$(get_static_ip)" == "$vm_ip" ]] || die "${STATIC_IP_NAME} does not hold ${vm_ip} after rotation"
 log "static IP is now ${vm_ip}; re-syncing services"
-for s in ${SERVICES}; do "${GCP_DIR}/deploy.sh" "$s"; done
+for s in ${SERVICES}; do
+  "${GCP_DIR}/deploy.sh" "$s" ||
+    die "IP is now ${vm_ip}, but re-syncing ${s} failed; finish with 'make all' (re-running update-ip would rotate again)"
+done
 "${GCP_DIR}/show.sh"

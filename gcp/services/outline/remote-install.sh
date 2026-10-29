@@ -155,6 +155,8 @@ fresh_install() {
 adopt() {
   log "existing Outline found: adopting (keys untouched)"
   remove_watchtower
+  # Turning Outline off sets restart=no (remote-disable.sh): restore the installer's policy before starting it.
+  docker update --restart=always shadowbox >/dev/null
   if [[ "$(docker inspect -f '{{.State.Running}}' shadowbox)" != true ]]; then
     log "starting shadowbox"
     docker start shadowbox >/dev/null
@@ -181,6 +183,8 @@ check_end_state() {
   [[ "$(jq -r .hostnameForAccessKeys <<<"$server")" == "${STATIC_IP}" ]] ||
     die "hostnameForAccessKeys is $(jq -r .hostnameForAccessKeys <<<"$server"), want ${STATIC_IP}"
   if docker inspect watchtower >/dev/null 2>&1; then die "watchtower is running; unattended updates are not allowed (spec §4.10)"; fi
+  [[ "$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' shadowbox)" == always ]] ||
+    die "shadowbox restart policy is not 'always': it would stay down after a reboot"
   log "healthy: $(key_count) access key(s); image $(running_repo_digests | head -n1)"
 }
 
