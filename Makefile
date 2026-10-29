@@ -4,7 +4,9 @@ SHELL := /bin/bash
 # Enabled services in deploy order, as gcp/lib.sh derives them from the *_ENABLED switches in gcp/config.env.
 SERVICES := $(shell bash -c '. gcp/lib.sh && echo "$$SERVICES"')
 OFF_SERVICES := $(filter-out $(SERVICES),$(notdir $(patsubst %/service.env,%,$(wildcard gcp/services/*/service.env))))
-.PHONY: help all infra $(SERVICES) $(OFF_SERVICES) upgrade $(addprefix upgrade-,$(SERVICES) $(OFF_SERVICES)) show verify update-ip test
+# Destructive targets honor CONFIRM only from the make command line, never from an exported environment variable.
+CONFIRM_ARG = $(if $(filter command line,$(origin CONFIRM)),$(CONFIRM))
+.PHONY: help all infra $(SERVICES) $(OFF_SERVICES) upgrade $(addprefix upgrade-,$(SERVICES) $(OFF_SERVICES)) show verify update-ip clean test
 
 help:
 	@printf '%s\n' \
@@ -22,6 +24,7 @@ help:
 	  '  show                 Print client URIs/keys and write netguru-client.json (contains secrets)' \
 	  '  verify               Run end-to-end tunnel, metadata-blocking, port, and firewall checks' \
 	  '  update-ip CONFIRM=1  Rotate the VM'\''s public static IP and re-sync services (every client config changes)' \
+	  '  clean                Show what would be deleted; with CONFIRM=<project>, delete all netguru resources on GCP' \
 	  '  test                 Run shellcheck and offline unit tests'
 
 all: infra $(SERVICES) show
@@ -51,7 +54,10 @@ verify:
 	gcp/verify.sh
 
 update-ip:
-	gcp/update-ip.sh
+	CONFIRM='$(CONFIRM_ARG)' gcp/update-ip.sh
+
+clean:
+	CONFIRM='$(CONFIRM_ARG)' gcp/clean.sh
 
 test:
 	shellcheck -x -P SCRIPTDIR gcp/*.sh gcp/services/*/*.sh gcp/tests/*.sh

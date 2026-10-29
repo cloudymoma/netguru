@@ -405,3 +405,43 @@ ip_rotation_state() {
   else echo release
   fi
 }
+
+# --- make clean: is it netguru's? (pure; the names alone are not proof) -------------------------------------------
+# vm_not_netguru VM_JSON -> why the VM is not netguru's, ", "-joined (empty = it is: NETWORK_TAG, on NETWORK_NAME)
+vm_not_netguru() {
+  jq -r --arg tag "${NETWORK_TAG}" --arg network "${NETWORK_NAME}" '
+    [ (if ((.tags.items // []) | index($tag)) == null then "no \($tag) tag" else empty end),
+      (if ((.networkInterfaces[0].network // "none") | split("/") | last) != $network then "not on \($network)" else empty end)
+    ] | join(", ")' <<<"$1"
+}
+
+# resource_other_users RESOURCE_JSON (address or disk) -> ", "-joined users other than VM_NAME (empty = none)
+resource_other_users() {
+  jq -r --arg vm "${VM_NAME}" '[(.users // [])[] | split("/") | last | select(. != $vm)] | join(", ")' <<<"$1"
+}
+
+# netguru_fw_rules RULES_JSON (firewall-rules list) -> netguru's rules that exist on NETWORK_NAME, space-separated
+netguru_fw_rules() {
+  jq -r --arg network "${NETWORK_NAME}" --arg managed "$(managed_fw_rules)" '
+    ($managed | split("\n")) as $m
+    | [ .[] | select((.network | split("/") | last) == $network) | .name | select(. as $n | $m | index($n)) ]
+    | join(" ")' <<<"$1"
+}
+
+# network_keep_reason NETWORK_JSON RULES_JSON INSTANCES_JSON -> why the VPC must stay (empty = netguru may delete it)
+network_keep_reason() {
+  local foreign others
+  if [[ "$(jq -r '.description // ""' <<<"$1")" != "managed by netguru" ]]; then
+    echo "netguru did not create it"
+    return
+  fi
+  foreign=$(foreign_fw_rules "$2")
+  if [[ -n "$foreign" ]]; then
+    echo "it has firewall rules netguru does not manage: ${foreign}"
+    return
+  fi
+  others=$(jq -r --arg network "${NETWORK_NAME}" --arg vm "${VM_NAME}" '
+    [ .[] | select(any(.networkInterfaces[]?; (.network | split("/") | last) == $network)) | .name | select(. != $vm) ]
+    | join(", ")' <<<"$3")
+  if [[ -n "$others" ]]; then echo "other VMs use it: ${others}"; fi
+}

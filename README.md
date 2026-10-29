@@ -16,8 +16,9 @@ With the defaults in [`gcp/config.env`](gcp/config.env), in one project:
 | Static IP | `netguru-jp-ip` | the address clients connect to |
 | VM | `netguru-server` | e2-small, Debian 12, 10 GB pd-balanced disk; no service account, Secure Boot, OS Login, deletion protection |
 
-It also enables `iap.googleapis.com` and changes nothing else in the project. The VM, disk and static IP are
-billable (about US$21/month in asia-northeast1 at the time of writing), plus internet egress.
+It also enables `iap.googleapis.com` and changes nothing else in the project; `make clean` removes all of it again.
+The VM, disk and static IP are billable (about US$21/month in asia-northeast1 at the time of writing), plus internet
+egress.
 
 ## Prerequisites
 
@@ -70,6 +71,7 @@ Edit [`gcp/config.env`](gcp/config.env):
 | `make verify` | end-to-end check from your workstation: each tunnel, blocked metadata server, open and closed ports, what an active scanner sees (the real site's certificate on the REALITY port; silence from Hysteria2 without the Salamander password), VM and firewall settings, and no rules left for turned-off services |
 | `make upgrade` | move sing-box to `SINGBOX_VERSION` (latest by default) and, when enabled, Outline to the current `stable` image; a no-op when current |
 | `make update-ip CONFIRM=1` | give the VM a new public IP; every client config changes. If the final re-sync fails, finish with `make all`: re-running `update-ip` would rotate again |
+| `make clean` | show what would be deleted; `make clean CONFIRM=<project>` deletes every netguru resource on GCP: the VM and its disk (every key and credential), the static IP, netguru's firewall rules, the subnet and the VPC. **Irreversible.** Refuses if the VM or static IP turns out not to be netguru's; keeps the VPC if anything netguru doesn't manage uses it; leaves the IAP API enabled |
 
 `make infra` runs only the infrastructure step; `make sing-box` and `make outline` run it plus one service, and
 `make upgrade-sing-box` and `make upgrade-outline` upgrade one service. For a turned-off service these targets stop at
