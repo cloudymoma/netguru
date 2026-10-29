@@ -129,6 +129,34 @@ sb_end_state() {
 expect_ok   "health check waits for the ports to bind after systemd reports active"  vm_fn "$SB_INSTALL" sb_end_state 3
 expect_fail "health check fails when the ports never bind"                          vm_fn "$SB_INSTALL" sb_end_state 0
 
+# Turning sing-box back on (after SINGBOX_ENABLED=false disabled it at boot) must leave it enabled, or the next reboot
+# brings it down. Both checks hold where errexit is off, as in these tests and in main's `if ! (check_end_state)`.
+# shellcheck disable=SC2329 # stubs invoked by the sourced check_end_state
+sb_end_state_not_enabled() {
+  systemctl() { [[ "$1" != is-enabled ]]; }
+  journalctl() { :; }
+  sleep() { :; }
+  dpkg-query() { echo 1.14.2; }
+  ss() { echo "LISTEN 0 4096 *:443 *:*"; }
+  check_end_state
+}
+expect_fail "health check fails when sing-box is not enabled at boot" vm_fn "$SB_INSTALL" sb_end_state_not_enabled
+# shellcheck disable=SC2034,SC2329 # globals and stubs are used by the sourced apply_config
+sb_apply_enable_fails() {
+  ETC="${SB_TMP}/etc-apply"
+  mkdir -p "$ETC"
+  render_singbox_config() { echo '{}'; }
+  sing-box() { return 0; }
+  systemctl() {
+    if [[ " $* " == *" enable "* ]]; then echo "Failed to enable unit: Unit file sing-box.service is masked." >&2; return 1; fi
+    return 0
+  }
+  apply_config
+}
+expect_fail "a failed enable stops the install" vm_fn "$SB_INSTALL" sb_apply_enable_fails
+expect_eq   "...and says why" "$(vm_fn "$SB_INSTALL" sb_apply_enable_fails 2>&1 | tail -1)" \
+  "[sing-box] ERROR: cannot enable sing-box at boot"
+
 # SINGBOX_ENABLED=false: make infra stops sing-box and disables it at boot, keeping /etc/sing-box (credentials).
 # sb_disable STATE — remote-disable main against a stubbed systemctl; prints its mutating calls. STATE: absent|running|stopped
 SB_DISABLE=gcp/services/sing-box/remote-disable.sh

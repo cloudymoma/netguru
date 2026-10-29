@@ -231,7 +231,9 @@ apply_config() {
     die "sing-box check failed; existing config left untouched"
   fi
   if cmp -s "$new" "${ETC}/config.json"; then rm -f "$new"; else mv "$new" "${ETC}/config.json"; changed=yes; fi
-  systemctl enable sing-box >/dev/null 2>&1
+  # Explicit die, not errexit: errexit is off wherever a caller tests this function, and the reason must show.
+  # Also undoes SINGBOX_ENABLED=false (remote-disable.sh disables sing-box at boot).
+  systemctl --quiet enable sing-box || die "cannot enable sing-box at boot"
   systemctl is-active --quiet sing-box && active=yes
   if [[ "$(needs_restart "$changed" "$PKG_CHANGED" "$active")" == yes ]]; then
     log "restarting sing-box (config changed=${changed}, package changed=${PKG_CHANGED}, was active=${active})"
@@ -249,8 +251,10 @@ listening() {
 }
 
 # systemd reports the Type=simple unit active as soon as it forks, before sing-box binds its ports: poll all three.
+# Enabled at boot is checked once (it doesn't change while we poll): otherwise the next reboot leaves sing-box down.
 check_end_state() {
   local problem
+  systemctl is-enabled --quiet sing-box || die "sing-box is not enabled at boot: it would stay down after a reboot"
   for _ in $(seq 1 10); do
     if ! systemctl is-active --quiet sing-box; then problem="sing-box is not active"
     elif ! listening tcp "$SINGBOX_REALITY_PORT"; then problem="not listening on tcp/${SINGBOX_REALITY_PORT}"
