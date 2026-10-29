@@ -1,4 +1,4 @@
-# netguru — secure multi-VPN on one GCP VM.
+# netguru — encrypted proxies (sing-box, optional Outline) on one locked-down GCP VM.
 SHELL := /bin/bash
 .NOTPARALLEL:
 # Enabled services in deploy order, as gcp/lib.sh derives them from the *_ENABLED switches in gcp/config.env.
