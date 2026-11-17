@@ -21,7 +21,7 @@ help:
 	  '  upgrade              Upgrade all enabled services to their latest upstream image/release' \
 	  '  upgrade-outline      Upgrade Outline shadowbox container to the latest stable digest (when enabled)' \
 	  '  upgrade-sing-box     Upgrade sing-box package to SINGBOX_VERSION (latest by default)' \
-	  '  show                 Print client URIs/keys and write netguru-client.json (contains secrets)' \
+	  '  show                 Print client URIs/keys and write netguru-client*.json (contain secrets)' \
 	  '  verify               Run end-to-end tunnel, metadata-blocking, port, and firewall checks' \
 	  '  update-ip CONFIRM=1  Rotate the VM'\''s public static IP and re-sync services (every client config changes)' \
 	  '  clean                Show what would be deleted; with CONFIRM=<project>, delete all netguru resources on GCP' \

@@ -61,7 +61,8 @@ charges, delete everything with [`make clean`](#everyday-commands). A
 
    They download netguru, save your Project ID in [`gcp/config.env`](gcp/config.env), turn on the Compute Engine API
    and build your server, which takes a few minutes. At the end you see your server's IP address, a `vless://` link,
-   a `hysteria2://` link and the path of `netguru-client.json`, a ready-made profile for the sing-box app.
+   a `hysteria2://` link and the paths of `netguru-client.json` (and `netguru-client-full.json`), ready-made profiles
+   for the sing-box app (1.14.0 or later).
 
 If something fails, check [Troubleshooting](#troubleshooting), then paste the lines again: every step is safe to
 repeat (`git clone` just reports that the folder already exists).
@@ -70,7 +71,8 @@ Using your own Linux or Mac computer instead? See [Run it from your own computer
 
 ### 3. Connect your devices
 
-1. Install the official **sing-box** app from the [sing-box download page](https://sing-box.sagernet.org/clients/):
+1. Install the official **sing-box** app (**1.14.0 or later**) from the
+   [sing-box download page](https://sing-box.sagernet.org/clients/):
    the App Store for iPhone, iPad and Mac (needs an Apple account outside mainland China); Google Play, F-Droid or
    GitHub for Android; GitHub for Windows and Linux.
 2. Download your profile by running this in Cloud Shell; your browser saves it to your Downloads folder:
@@ -79,7 +81,10 @@ Using your own Linux or Mac computer instead? See [Run it from your own computer
    cloudshell download ~/netguru/netguru-client.json
    ```
 
-   For a phone, move it over in a private way, such as AirDrop or a USB cable.
+   For a phone, move it over in a private way, such as AirDrop or a USB cable. Try a changed profile on one device
+   before rolling it out to the rest. (`netguru-client-full.json` is a full-tunnel fallback that needs no rule-set
+   download on its first launch — useful if `netguru-reality` is unreachable before `netguru-client.json` has cached
+   its rule-sets.)
 3. In the app, go to **Profiles → New Profile → Local → Import** and pick the file, then start it on the
    **Dashboard**. The first time, allow the permission prompt: that's how the app routes your traffic through the
    proxy.
@@ -102,7 +107,7 @@ Run them in the netguru folder: in a new Cloud Shell session, run `cd ~/netguru`
 
 | Command | What it does |
 |---|---|
-| `make show` | Print your links again and rewrite `netguru-client.json`. **Contains secrets.** |
+| `make show` | Print your links again and rewrite `netguru-client.json` and `netguru-client-full.json`. **Contains secrets.** |
 | `make all` | Apply your changes after editing `gcp/config.env`. Safe to run any time. |
 | `make upgrade` | Update sing-box (and Outline, when on) on the server to the latest version. |
 | `make update-ip CONFIRM=1` | Give the server a new IP address, for example if the old one is blocked. Every device must then re-import the new profile or links, which it prints at the end. |
@@ -115,19 +120,21 @@ More detail:
 - `make all` creates or repairs the infrastructure, installs (or adopts) each enabled service, stops turned-off ones,
   then runs `make show`. `make infra` runs only the infrastructure step; `make sing-box` and `make outline` run it plus
   one service.
-- `make show` prints the `vless://` and `hysteria2://` links (plus Outline `ss://` keys when enabled) and writes the
-  sing-box profile for SFI/SFA/SFM to `netguru-client.json` (mode 600, git-ignored), replacing it only when every
-  service answered.
+- `make show` prints the `vless://` and `hysteria2://` links (plus Outline `ss://` keys when enabled) and writes two
+  sing-box 1.14+ profiles for SFI/SFA/SFM (mode 600, git-ignored), replacing them only when every service answered:
+  `netguru-client.json` (honoring `CLIENT_BYPASS_CN`) and `netguru-client-full.json` (always full-tunnel, with no
+  first-launch rule-set download).
 - `make upgrade` moves sing-box to `SINGBOX_VERSION` (latest by default) and, when enabled, Outline to the current
   `stable` image; it's a no-op when they're current. `make upgrade-sing-box` and `make upgrade-outline` upgrade one
   service. For a turned-off service, these targets stop at once and name the switch to set.
 - `make update-ip`: if the final re-sync fails, finish with `make all`; re-running `update-ip` would rotate again.
 - `make verify` checks, from where you run it: each tunnel, the blocked metadata server, open and closed ports, what
-  an active scanner sees (the real site's certificate on the REALITY port; silence from Hysteria2 without the
+  an active scanner sees (the real site's certificate over TLS 1.3 + X25519 + HTTP/2 on the REALITY port, rejection of
+  unrelated hostnames, warnings on TCP-close differences from the genuine site, and silence from Hysteria2 without the
   Salamander password), VM and firewall settings, and that no rules are left for turned-off services.
 - `make clean` deletes the VM and its disk (every key and credential), the static IP, netguru's firewall rules, the
   subnet and the VPC. It refuses if the VM or static IP turns out not to be netguru's, keeps the VPC if anything
-  netguru doesn't manage uses it, and leaves the IAP API enabled and your local `netguru-client.json` in place.
+  netguru doesn't manage uses it, and leaves the IAP API enabled and your local `netguru-client*.json` files in place.
 - `make test` runs shellcheck and offline unit tests, without GCP access.
 
 ## Settings
@@ -139,8 +146,10 @@ All settings are in [`gcp/config.env`](gcp/config.env), and the defaults work: t
 - `GCP_PROJECT`: your Project ID (or per run: `GCP_PROJECT=my-project make all`).
 - `GCP_REGION`, `GCP_ZONE`: where the VM runs. Choose them before the first deploy; to move an existing VM, run
   `make clean` first (every client then needs the new keys and IP). If you move it out of Japan, also set
-  `SINGBOX_REALITY_SNI` to a well-known site near the new region that serves TLS 1.3 and HTTP/2 and isn't a commonly
-  abused default such as `www.apple.com`. The installer checks TLS 1.3 and HTTP/2 and stops if either is missing.
+  `SINGBOX_REALITY_SNI` to a dedicated origin near the new region that is reachable from your network, serves TLS 1.3,
+  HTTP/2 and X25519 on its own infrastructure (not a shared CDN such as Cloudflare or Akamai), and isn't a commonly
+  abused default such as `www.apple.com`. The installer checks TLS 1.3, HTTP/2, X25519 and that the target IP does not
+  return valid certificates for unrelated hostnames.
 - `VM_NAME`, `NETWORK_NAME`, `NETWORK_TAG`, `STATIC_IP_NAME`: change only before the first deploy, and only if they
   clash with existing resources. `VM_MACHINE_TYPE`, `VM_DISK_*`, `VM_IMAGE_*` and `SUBNET_RANGE` apply only when the
   resource is first created.
@@ -149,18 +158,30 @@ All settings are in [`gcp/config.env`](gcp/config.env), and the defaults work: t
   off on a deployed VM makes `make all` (or `make infra`) delete its firewall rule and stop it; its keys and
   credentials stay on the VM (`/opt/outline`, `/etc/sing-box`), so turning it back on restores the same client
   configs. With Outline on, import its `ss://` keys into the [Outline client](https://getoutline.org/).
+- `SINGBOX_REALITY_MAX_TIME_DIFF`: `1m` by default (`""` disables). Rejects REALITY handshakes whose client clock
+  differs from the server's by more than 1 minute, forwarding delayed replays to `SINGBOX_REALITY_SNI`. A device with
+  an inaccurate clock fails REALITY with `reality verification failed`, while Hysteria2 continues to work.
 - `SINGBOX_HY2_SALAMANDER`: `true` by default. Every Hysteria2 packet is obfuscated, so a probe without the obfs
-  password gets no reply and never sees the server's self-signed certificate. Every Hysteria2 client needs
-  Salamander support and the obfs password (both are in the `make show` output); set `false` only for a client
-  without it. Switching it changes the Hysteria2 client config, so re-import it from `make show`. The cost is CPU:
-  Hysteria2 traffic takes about 3x the server CPU and 2x the client CPU per GB (REALITY is unaffected).
+  password gets no reply (matching a firewalled UDP port) and never sees the server's self-signed certificate. Every
+  Hysteria2 client needs Salamander support and the obfs password (both are in the `make show` output); set `false`
+  only for a client without it — **with Salamander off, Hysteria2 is detectable by active probing** (even though
+  unauthenticated HTTP/3 requests are reverse-proxied to `SINGBOX_HY2_SNI`, the self-signed certificate is visible).
+  Switching it changes the Hysteria2 client config, so re-import it from `make show`. The cost is CPU: Hysteria2
+  traffic takes about 3x the server CPU and 2x the client CPU per GB (REALITY is unaffected).
+- `CLIENT_BYPASS_CN`: `true` by default. In `netguru-client.json` (requires sing-box 1.14.0+), Mainland China domains
+  and IPs (`geosite-cn`, `geoip-cn`) go direct with AliDNS DoH (`223.5.5.5`), so domestic traffic doesn't loop across
+  the border through the VM; the rule-sets download through the proxy and are cached locally across restarts. Note
+  that `geosite-cn` also includes foreign domains served from China (such as `www.gstatic.com` and
+  `fonts.googleapis.com`). Set `false` (or import `netguru-client-full.json`) to send all non-private traffic through
+  the proxy.
 - `SINGBOX_LOG_ENABLED`, `SINGBOX_LOG_LEVEL`: sing-box server logging, on at `warn` by default. At `warn`, users'
   connections aren't logged; failed lookups and dials log the destination without the client IP, and every
   unauthenticated probe of the REALITY port logs one line with the prober's IP, which shows active probing. `info`,
   `debug` and `trace` log every connection with the client IP and destination, so use them only briefly while
   troubleshooting. Startup failures are reported (and shown by `make all`) even with logging off.
 - `SINGBOX_VERSION`: `latest` (the default) or a fixed `X.Y.Z`, installed on first deploy and by `make upgrade`.
-- `SINGBOX_ENABLE_BBR`: when `true` (the default), turns on BBR congestion control on the VM for faster TCP.
+- `SINGBOX_ENABLE_BBR`: when `true` (the default), turns on BBR congestion control on the VM for faster TCP (8 MiB UDP
+  socket buffers for Hysteria2 are always configured).
 - Ports: any free ports, without leading zeros. `tcp:22` is reserved for SSH, and collisions are rejected.
   `OUTLINE_API_PORT` and `OUTLINE_KEYS_PORT` can't be changed once Outline is installed: its existing keys stay on the
   old port.
@@ -186,8 +207,8 @@ enables only the IAP API (`iap.googleapis.com`) and changes nothing else in the 
 the above again; the APIs stay on.
 
 "Locked down" means: SSH is reachable only through Google's Identity-Aware Proxy, never straight from the internet;
-the VM holds no cloud credentials; sing-box refuses to connect to private addresses and the cloud metadata server;
-and Secure Boot, OS Login and deletion protection are on.
+the VM holds no cloud credentials; sing-box refuses to connect to private addresses and the cloud metadata server (and
+includes a best-effort guard against plaintext BitTorrent); and Secure Boot, OS Login and deletion protection are on.
 
 ## Run it from your own computer
 
@@ -210,7 +231,10 @@ You can also run netguru from a Linux or Mac terminal instead of Cloud Shell (on
 | `jq: command not found` | Install jq: `sudo apt-get install -y jq` on Debian or Ubuntu, `brew install jq` on a Mac. |
 | `latest GitHub release is not a stable X.Y.Z release (got '')` | GitHub's API didn't answer, often a rate limit. Wait a few minutes and run `make all` again, or set `SINGBOX_VERSION` to a fixed version. |
 | `newest signed sing-box in apt is ... retry later` | A new sing-box release isn't in its package repository yet. Wait a while, then run `make all` again. |
-| `cannot reach REALITY target ...` or `... must speak HTTP/2 over TLS 1.3` | Choose another `SINGBOX_REALITY_SNI` (see [Settings](#settings)). |
+| `cannot reach REALITY target ...`, `... must speak HTTP/2 over TLS 1.3`, or `... serves a valid certificate for unrelated hostname ...` | Choose another `SINGBOX_REALITY_SNI` on dedicated infrastructure (see [Settings](#settings)). |
+| `VM clock is not NTP-synchronized` | Wait a moment on a brand-new VM and re-run `make all`, fix NTP on the VM, or set `SINGBOX_REALITY_MAX_TIME_DIFF=""` in `gcp/config.env`. |
+| `reality verification failed` on a client device | Either the device's clock is off by more than `SINGBOX_REALITY_MAX_TIME_DIFF` (1 minute by default) or its profile holds old credentials (for example after `make clean`). Turn on automatic date and time (switch `proxy` to `netguru-hy2` in **Groups** in the meantime — Hysteria2 still works); if the clock is right, re-import the profile from `make show`. |
+| First launch of `netguru-client.json` exits with `initialize rule-set` | `netguru-reality` could not be reached to fetch the initial rule-sets. Import `netguru-client-full.json` instead (no rule-set download) and switch `proxy` to `netguru-hy2` in **Groups**. |
 | `SSH over IAP to netguru-server not available after 150s` | See [SSH access](#ssh-access-and-iap_source_range). |
 | It worked before, but no longer connects | In the app's **Groups** view, switch `proxy` between `netguru-reality` and `netguru-hy2`. If neither works, the IP address may be blocked: run `make update-ip CONFIRM=1` and re-import on every device. |
 

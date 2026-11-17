@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # VM-side (root): install and configure official sing-box — VLESS-REALITY + Hysteria2 (spec §4.6).
 # Env: STATIC_IP UPGRADE(yes|no) SINGBOX_VERSION(latest|X.Y.Z) SINGBOX_TARGET_VERSION (resolved on the workstation, spec §4.10)
-#      SINGBOX_GPG_FINGERPRINT SINGBOX_REALITY_PORT SINGBOX_REALITY_SNI
+#      SINGBOX_GPG_FINGERPRINT SINGBOX_REALITY_PORT SINGBOX_REALITY_SNI SINGBOX_REALITY_MAX_TIME_DIFF
 #      SINGBOX_HY2_PORT SINGBOX_HY2_SNI SINGBOX_HY2_SALAMANDER SINGBOX_ENABLE_BBR SINGBOX_LOG_ENABLED SINGBOX_LOG_LEVEL
 set -euo pipefail
 
 ETC=/etc/sing-box
 CREDS="${ETC}/credentials.env"
 CERT_DIR="${ETC}/certs"
+: "${SYSCTL_CONF:=/etc/sysctl.d/99-sing-box.conf}"
+: "${LEGACY_BBR_CONF:=/etc/sysctl.d/99-bbr.conf}"
 APT_OPTS=(-y -q -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3 -o Dpkg::Options::=--force-confold) # wait out unattended-upgrades
 PKG_CHANGED=no
 CERT_CHANGED=no
@@ -28,11 +30,23 @@ apt_update() {
   die "apt-get update failed after 12 attempts"
 }
 
-enable_bbr() {
-  if [[ "${SINGBOX_ENABLE_BBR}" != true ]]; then log "BBR disabled by config"; return; fi
-  printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >/etc/sysctl.d/99-bbr.conf
+tune_network() {
+  rm -f "$LEGACY_BBR_CONF"
+  {
+    printf 'net.core.rmem_max=8388608\nnet.core.wmem_max=8388608\n'
+    printf 'net.core.rmem_default=8388608\nnet.core.wmem_default=8388608\n'
+    if [[ "${SINGBOX_ENABLE_BBR}" == true ]]; then
+      printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n'
+    else
+      log "BBR disabled by config"
+    fi
+  } >"$SYSCTL_CONF"
   sysctl --system >/dev/null
-  [[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == bbr ]] || die "BBR did not take effect"
+  [[ "$(sysctl -n net.core.rmem_default)" -ge 8388608 && "$(sysctl -n net.core.wmem_default)" -ge 8388608 ]] ||
+    die "UDP buffer sysctls did not take effect"
+  if [[ "${SINGBOX_ENABLE_BBR}" == true ]]; then
+    [[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == bbr ]] || die "BBR did not take effect"
+  fi
 }
 
 # singbox_install_action INSTALLED(empty if none) TARGET UPGRADE(yes|no) -> install|upgrade|keep
@@ -116,10 +130,44 @@ rollback_package() {
 }
 
 check_reality_target() {
-  local v
-  v=$(curl -sS --tlsv1.3 --http2 -o /dev/null -w '%{http_version}' --retry 3 --max-time 10 "https://${SINGBOX_REALITY_SNI}/") ||
-    die "cannot reach REALITY target ${SINGBOX_REALITY_SNI} over TLS 1.3"
+  local hdr out v ip cname canary tls
+  hdr=$(mktemp)
+  if ! out=$(curl -4 -sS --tlsv1.3 --http2 --curves X25519 -D "$hdr" -o /dev/null \
+    -w '%{http_version} %{remote_ip}' --retry 3 --max-time 10 "https://${SINGBOX_REALITY_SNI}/"); then
+    rm -f "$hdr"
+    die "cannot reach REALITY target ${SINGBOX_REALITY_SNI} over TLS 1.3 with X25519"
+  fi
+  read -r v ip <<<"$out"
+  cname=$({ getent ahostsv4 "${SINGBOX_REALITY_SNI}" 2>/dev/null || true; } | awk 'NR == 1 { print $3 }')
+  if [[ "${cname,,}" =~ (akamai|akamaiedge|edgesuite|edgekey|cloudfront|cloudflare|fastly|azureedge|azurefd|incapdns|imperva|edgecast|cdn77|llnwd|ves\.io|f5aas|vercel-dns|netlify) ]]; then
+    warn "REALITY target ${SINGBOX_REALITY_SNI} resolves to CDN CNAME ${cname}; dedicated origins resist active probing better"
+  elif grep -qiE '^(server:.*(cloudflare|akamaighost|cloudfront|fastly|imperva)|cf-ray:|x-amz-cf-id:|x-served-by:)' "$hdr"; then
+    warn "REALITY target ${SINGBOX_REALITY_SNI} sends CDN response headers; dedicated origins resist active probing better"
+  fi
+  rm -f "$hdr"
   [[ "$v" == 2 ]] || die "REALITY target ${SINGBOX_REALITY_SNI} must speak HTTP/2 over TLS 1.3 (got HTTP/${v})"
+  [[ -n "$ip" ]] || die "could not determine IPv4 address of REALITY target ${SINGBOX_REALITY_SNI}"
+  for canary in www.adobe.com www.ikea.com aws.amazon.com www.fastly.com; do
+    [[ "$canary" == "${SINGBOX_REALITY_SNI}" ]] && continue
+    # The verdict is the TLS handshake: time_appconnect stays 0.000000 unless the certificate validated for the canary.
+    # Don't wait for the HTTP response: some sites stall it, and a timed-out request would wave a shared edge through.
+    tls=$(curl -4 -sS -o /dev/null --max-time 5 --resolve "${canary}:443:${ip}" -w '%{time_appconnect}' \
+      "https://${canary}/" 2>/dev/null) || true
+    if [[ -n "$tls" && "$tls" != 0.000000 ]]; then
+      die "REALITY target ${SINGBOX_REALITY_SNI} (${ip}) serves a valid certificate for unrelated hostname ${canary} (shared CDN)"
+    fi
+  done
+}
+
+check_time_sync() {
+  [[ -n "${SINGBOX_REALITY_MAX_TIME_DIFF}" ]] || return 0
+  local i
+  for i in $(seq 1 6); do
+    [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]] && return 0
+    log "waiting for VM NTP synchronization (${i}/6)"
+    sleep 5
+  done
+  die "VM clock is not NTP-synchronized (required by SINGBOX_REALITY_MAX_TIME_DIFF=${SINGBOX_REALITY_MAX_TIME_DIFF}); fix NTP on the VM or set SINGBOX_REALITY_MAX_TIME_DIFF=\"\" in gcp/config.env"
 }
 
 # add_missing_credential NAME — for a value introduced after this VM's first install: append a fresh random value
@@ -184,8 +232,8 @@ ensure_cert() {
 
 render_singbox_config() {
   jq -n --arg uuid "$VLESS_UUID" --arg priv "$REALITY_PRIVATE_KEY" --arg sid "$REALITY_SHORT_ID" \
-    --arg sni "$SINGBOX_REALITY_SNI" --argjson rport "$SINGBOX_REALITY_PORT" \
-    --arg pass "$HY2_PASSWORD" --argjson hport "$SINGBOX_HY2_PORT" \
+    --arg sni "$SINGBOX_REALITY_SNI" --arg max_td "${SINGBOX_REALITY_MAX_TIME_DIFF}" --argjson rport "$SINGBOX_REALITY_PORT" \
+    --arg pass "$HY2_PASSWORD" --arg hsni "$SINGBOX_HY2_SNI" --argjson hport "$SINGBOX_HY2_PORT" \
     --arg obfs "$HY2_OBFS_PASSWORD" --argjson salamander "$SINGBOX_HY2_SALAMANDER" \
     --argjson log_on "$SINGBOX_LOG_ENABLED" --arg log_level "$SINGBOX_LOG_LEVEL" \
     --arg crt "${CERT_DIR}/hy2.crt" --arg key "${CERT_DIR}/hy2.key" '{
@@ -195,10 +243,12 @@ render_singbox_config() {
       {type: "vless", tag: "vless-reality-in", listen: "::", listen_port: $rport,
        users: [{uuid: $uuid, flow: "xtls-rprx-vision"}],
        tls: {enabled: true, server_name: $sni,
-             reality: {enabled: true, handshake: {server: $sni, server_port: 443},
-                       private_key: $priv, short_id: [$sid]}}},
+             reality: ({enabled: true, handshake: {server: $sni, server_port: 443},
+                        private_key: $priv, short_id: [$sid]}
+                       + if ($max_td | length) > 0 then {max_time_difference: $max_td} else {} end)}},
       ({type: "hysteria2", tag: "hysteria2-in", listen: "::", listen_port: $hport,
         users: [{password: $pass}],
+        masquerade: {type: "proxy", url: ("https://" + $hsni), rewrite_host: true},
         tls: {enabled: true, alpn: ["h3"], certificate_path: $crt, key_path: $key}}
        + if $salamander then {obfs: {type: "salamander", password: $obfs}} else {} end)
     ],
@@ -206,6 +256,8 @@ render_singbox_config() {
     route: {
       default_domain_resolver: "local",
       rules: [
+        {action: "sniff", sniffer: ["bittorrent"], timeout: "50ms"},
+        {protocol: "bittorrent", action: "reject"},
         {action: "resolve", server: "local"},
         {ip_is_private: true, action: "reject"},
         {ip_cidr: ["169.254.0.0/16"], action: "reject"}
@@ -271,9 +323,10 @@ check_end_state() {
 
 main() {
   install -d -m 0755 "$ETC"
-  enable_bbr
+  tune_network
   install_package
   check_reality_target
+  check_time_sync
   ensure_credentials
   ensure_cert
   apply_config

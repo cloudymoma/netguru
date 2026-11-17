@@ -37,23 +37,242 @@ sb_fn "$SB_INSTALL" render_singbox_config >"${SB_TMP}/server.json"
 expect_ok "rendered server config passes 'sing-box check' (1.14.2)" sing-box check -c "${SB_TMP}/server.json"
 expect_eq "rendering is deterministic (re-deploy compares equal, no restart)" \
   "$(sb_fn "$SB_INSTALL" render_singbox_config | sha256sum)" "$(sha256sum <"${SB_TMP}/server.json")"
-expect_eq "domains are resolved before the private-IP reject rules" \
-  "$(jq -r '[.route.rules[].action] | join(",")' "${SB_TMP}/server.json")" "resolve,reject,reject"
+expect_eq "narrow BitTorrent sniff runs before resolve and private-IP reject rules" \
+  "$(jq -r '[.route.rules[].action] | join(",")' "${SB_TMP}/server.json")" "sniff,reject,resolve,reject,reject"
+expect_eq "server sniff is scoped to bittorrent with a 50ms timeout" \
+  "$(jq -c '[.route.rules[0], .route.rules[1]]' "${SB_TMP}/server.json")" \
+  '[{"action":"sniff","sniffer":["bittorrent"],"timeout":"50ms"},{"protocol":"bittorrent","action":"reject"}]'
 expect_eq "private and link-local (metadata) destinations are rejected" \
-  "$(jq -c '[.route.rules[1].ip_is_private, .route.rules[2].ip_cidr]' "${SB_TMP}/server.json")" \
+  "$(jq -c '[.route.rules[3].ip_is_private, .route.rules[4].ip_cidr]' "${SB_TMP}/server.json")" \
   '[true,["169.254.0.0/16"]]'
 expect_eq "inbounds are REALITY on tcp 443 and Hysteria2 on 8443" \
   "$(jq -r '[.inbounds[] | "\(.type):\(.listen_port)"] | join(",")' "${SB_TMP}/server.json")" \
   "vless:443,hysteria2:8443"
+expect_eq "REALITY limits client clock skew to SINGBOX_REALITY_MAX_TIME_DIFF by default" \
+  "$(jq -r '.inbounds[0].tls.reality.max_time_difference' "${SB_TMP}/server.json")" "1m"
+SINGBOX_REALITY_MAX_TIME_DIFF="" sb_fn "$SB_INSTALL" render_singbox_config >"${SB_TMP}/server-notd.json"
+expect_ok "empty SINGBOX_REALITY_MAX_TIME_DIFF passes 'sing-box check'" sing-box check -c "${SB_TMP}/server-notd.json"
+expect_eq "empty SINGBOX_REALITY_MAX_TIME_DIFF omits max_time_difference" \
+  "$(jq -c '.inbounds[0].tls.reality | has("max_time_difference")' "${SB_TMP}/server-notd.json")" "false"
+# shellcheck disable=SC2016
+expect_ok   "SINGBOX_REALITY_MAX_TIME_DIFF accepts empty or s/m/h durations" \
+  bash -c '. gcp/lib.sh; load_service sing-box; for d in "" 30s 1m 2m 1h; do SINGBOX_REALITY_MAX_TIME_DIFF=$d service_validate || exit 1; done'
+expect_fail "SINGBOX_REALITY_MAX_TIME_DIFF rejects unitless numbers" \
+  bash -c '. gcp/lib.sh; SINGBOX_REALITY_MAX_TIME_DIFF=60; load_service sing-box; service_validate'
+expect_fail "SINGBOX_REALITY_MAX_TIME_DIFF rejects zero duration" \
+  bash -c '. gcp/lib.sh; SINGBOX_REALITY_MAX_TIME_DIFF=0m; load_service sing-box; service_validate'
+
+# check_time_sync ensures VM NTP sync before enabling max_time_difference, and names the escape hatch on failure.
+# shellcheck disable=SC2034,SC2329 # globals and stubs invoked by sourced check_time_sync
+sb_time_sync() {
+  local max_td=$1 sync_on=$2 tries="${SB_TMP}/ntp-tries"
+  : >"$tries"
+  SINGBOX_REALITY_MAX_TIME_DIFF=$max_td
+  sleep() { :; }
+  timedatectl() {
+    echo try >>"$tries"
+    if ((sync_on > 0 && $(wc -l <"$tries") >= sync_on)); then echo yes; else echo no; fi
+  }
+  check_time_sync
+}
+expect_ok   "check_time_sync succeeds once NTPSynchronized becomes yes" vm_fn "$SB_INSTALL" sb_time_sync 1m 3
+expect_fail "check_time_sync fails when NTP never synchronizes"         vm_fn "$SB_INSTALL" sb_time_sync 1m 0
+# shellcheck disable=SC2016 # $1 is expanded by the inner bash
+expect_ok   "check_time_sync error names SINGBOX_REALITY_MAX_TIME_DIFF=\"\" escape hatch" \
+  bash -c 'grep -qF '\''SINGBOX_REALITY_MAX_TIME_DIFF=""'\'' <<<"$1"' _ "$(vm_fn "$SB_INSTALL" sb_time_sync 1m 0 2>&1)"
+expect_ok   "check_time_sync is skipped when SINGBOX_REALITY_MAX_TIME_DIFF is empty" vm_fn "$SB_INSTALL" sb_time_sync "" 0
+expect_eq   "...without calling timedatectl" "$(wc -l <"${SB_TMP}/ntp-tries")" "0"
+
+# check_reality_target requires TLS 1.3 + HTTP/2 + X25519, rejects targets whose IP serves valid certs for unrelated
+# hostnames (shared CDNs), and warns on CDN CNAMEs or headers without failing dedicated origins.
+# shellcheck disable=SC2034,SC2329 # globals and stubs used by sourced check_reality_target
+sb_reality_target() {
+  local mode=$1
+  SINGBOX_REALITY_SNI=origin.example.jp
+  getent() {
+    if [[ "$mode" == cdn-cname ]]; then
+      printf '198.51.100.7    STREAM a488.r.akamai.net\n'
+    else
+      printf '198.51.100.7    STREAM edge12.g.yimg.jp\n'
+    fi
+  }
+  curl() {
+    local args=" $* " hdr="" i
+    for ((i = 1; i <= $#; i++)); do
+      if [[ "${!i}" == "-D" ]]; then local next=$((i + 1)); hdr=${!next}; fi
+    done
+    if [[ "$args" == *" --resolve "* ]]; then # canary probe: prints %{time_appconnect}
+      if [[ "$mode" == shared-cdn* && "$args" == *" https://www.adobe.com/ "* ]]; then
+        printf '0.104706'
+        [[ "$mode" == shared-cdn-stall ]] && return 28 # certificate validated, then the HTTP response never arrives
+        return 0
+      fi
+      printf '0.000000'
+      return 60
+    fi
+    [[ "$args" == *" --curves X25519 "* ]] || return 99
+    case "$mode" in
+      no-x25519) return 35 ;;
+      http1)     [[ -z "$hdr" ]] || printf 'HTTP/1.1 200 OK\r\n\r\n' >"$hdr"; printf '1.1 198.51.100.7' ;;
+      cdn-hdr)   [[ -z "$hdr" ]] || printf 'HTTP/2 200\r\nserver: AkamaiGHost\r\n\r\n' >"$hdr"; printf '2 198.51.100.7' ;;
+      *)         [[ -z "$hdr" ]] || printf 'HTTP/2 200\r\nserver: yserver\r\n\r\n' >"$hdr"; printf '2 198.51.100.7' ;;
+    esac
+  }
+  check_reality_target
+}
+expect_ok   "check_reality_target accepts TLS 1.3 + h2 + X25519 dedicated origin" vm_fn "$SB_INSTALL" sb_reality_target ok
+expect_fail "check_reality_target rejects target without X25519"                  vm_fn "$SB_INSTALL" sb_reality_target no-x25519
+expect_fail "check_reality_target rejects HTTP/1.1 target"                        vm_fn "$SB_INSTALL" sb_reality_target http1
+expect_fail "check_reality_target rejects target serving valid cert for unrelated SNI" vm_fn "$SB_INSTALL" sb_reality_target shared-cdn
+expect_fail "...even when the canary's HTTP response stalls after the handshake" vm_fn "$SB_INSTALL" sb_reality_target shared-cdn-stall
+# shellcheck disable=SC2016
+expect_ok   "...naming the unrelated hostname" \
+  bash -c 'grep -q "www.adobe.com" <<<"$1"' _ "$(vm_fn "$SB_INSTALL" sb_reality_target shared-cdn 2>&1)"
+# shellcheck disable=SC2016
+expect_ok   "check_reality_target warns on CDN headers when certs do not leak" \
+  bash -c 'grep -q "WARN:.*CDN" <<<"$1"' _ "$(vm_fn "$SB_INSTALL" sb_reality_target cdn-hdr 2>&1)"
+# shellcheck disable=SC2016
+expect_ok   "check_reality_target warns on CDN CNAME even when headers are quiet" \
+  bash -c 'grep -q "WARN:.*CDN" <<<"$1" && grep -q "a488.r.akamai.net" <<<"$1"' _ "$(vm_fn "$SB_INSTALL" sb_reality_target cdn-cname 2>&1)"
+expect_eq   "check_reality_target emits no CDN warning for a dedicated origin (e.g. yimg.jp)" \
+  "$(vm_fn "$SB_INSTALL" sb_reality_target ok 2>&1)" ""
+
+# verify.sh differential scanner comparison: reports PASS when close behavior matches and WARN (not FAIL) when it differs.
+SB_VERIFY=gcp/verify.sh
+sb_diff_test() {
+  python3 - "$SB_VERIFY" "$1" <<'PY'
+import socket, ssl, subprocess, sys, tempfile, threading, time
+
+verify_sh, mode = sys.argv[1], sys.argv[2]
+with tempfile.TemporaryDirectory() as d:
+    subprocess.check_call([
+        "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+        "-nodes", "-days", "1", "-subj", "/CN=origin.example.jp",
+        "-addext", "subjectAltName=DNS:origin.example.jp",
+        "-keyout", f"{d}/k.pem", "-out", f"{d}/c.pem",
+    ], stderr=subprocess.DEVNULL)
+
+    def serve(hold_open, rst_garbage):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        port = srv.getsockname()[1]
+        def loop():
+            while True:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    break
+                def handle(conn):
+                    try:
+                        conn.settimeout(2)
+                        first = conn.recv(1, socket.MSG_PEEK)
+                        if not first or first[0] != 0x16:
+                            if rst_garbage:
+                                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+                            else:
+                                conn.recv(4096)
+                            conn.close()
+                            return
+                        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                        ctx.load_cert_chain(f"{d}/c.pem", f"{d}/k.pem")
+                        ctx.set_alpn_protocols(["http/1.1", "h2"])
+                        ib, ob = ssl.MemoryBIO(), ssl.MemoryBIO()
+                        sobj = ctx.wrap_bio(ib, ob, server_side=True)
+                        while True:
+                            try:
+                                sobj.do_handshake()
+                                break
+                            except ssl.SSLWantReadError:
+                                conn.sendall(ob.read())
+                                ib.write(conn.recv(4096))
+                        conn.sendall(ob.read())
+                        while True:
+                            try:
+                                sobj.read(4096)
+                                break
+                            except ssl.SSLWantReadError:
+                                ib.write(conn.recv(4096))
+                        sobj.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                        try:
+                            sobj.unwrap()
+                        except ssl.SSLWantReadError:
+                            pass
+                        conn.sendall(ob.read())
+                        if hold_open:
+                            time.sleep(2.0)
+                        conn.close()
+                    except Exception:
+                        try: conn.close()
+                        except Exception: pass
+                threading.Thread(target=handle, args=(c,), daemon=True).start()
+        threading.Thread(target=loop, daemon=True).start()
+        return srv, port
+
+    ca = f"{d}/c.pem"
+    if mode == "bad-ca":  # neither probe can verify TLS: the two identical failures must not count as a match
+        subprocess.check_call([
+            "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+            "-nodes", "-days", "1", "-subj", "/CN=unrelated.example", "-keyout", f"{d}/k2.pem", "-out", f"{d}/other.pem",
+        ], stderr=subprocess.DEVNULL)
+        ca = f"{d}/other.pem"
+    s1, p1 = serve(hold_open=False, rst_garbage=(mode == "rst-diff"))
+    s2, p2 = serve(hold_open=(mode == "no-fin"), rst_garbage=False)
+    cmd = f"NETGURU_SOURCE_ONLY=1 . ./{verify_sh}; SINGBOX_REALITY_SNI=origin.example.jp SINGBOX_REALITY_PORT={p2} STATIC_IP=127.0.0.1 REALITY_GENUINE_ADDR=127.0.0.1:{p1} REALITY_SSL_CA={ca} REALITY_FIN_WAIT=1.0 reality_compare_genuine; echo EXIT=$FAILED"
+    out = subprocess.check_output(["bash", "-c", cmd], text=True)
+    s1.close(); s2.close()
+    print(out.strip())
+PY
+}
+# shellcheck disable=SC2016
+expect_ok "verify differential check passes when fallback matches genuine close behavior" \
+  bash -c '[[ "$1" == *"PASS"* && "$1" != *"WARN"* && "$1" == *"EXIT=0" ]]' _ "$(sb_diff_test match 2>&1)"
+# shellcheck disable=SC2016
+expect_ok "verify differential check warns (without failing) when fallback omits TCP FIN" \
+  bash -c '[[ "$1" == *"WARN"* && "$1" == *"no-FIN"* && "$1" == *"EXIT=0" ]]' _ "$(sb_diff_test no-fin 2>&1)"
+# shellcheck disable=SC2016
+expect_ok "verify differential check warns (without failing) when invalid-input close differs" \
+  bash -c '[[ "$1" == *"WARN"* && "$1" == *"RST"* && "$1" == *"EXIT=0" ]]' _ "$(sb_diff_test rst-diff 2>&1)"
+# shellcheck disable=SC2016
+expect_ok "verify differential check reports no match when both probes fail the same way" \
+  bash -c '[[ "$1" == *"TCP close after TLS EOF could not be compared"* && "$1" != *"TLS EOF matches"* && "$1" == *"EXIT=0" ]]' _ "$(sb_diff_test bad-ca 2>&1)"
 
 # Salamander (on by default): probes without the obfs password get no reply, so the self-signed cert never leaks.
 expect_eq "Hysteria2 obfuscates with Salamander by default" \
   "$(jq -c '.inbounds[1].obfs' "${SB_TMP}/server.json")" \
   '{"type":"salamander","password":"ffeeddccbbaa99887766554433221100"}'
+expect_eq "Hysteria2 configures proxy masquerade with rewrite_host" \
+  "$(jq -c '.inbounds[1].masquerade' "${SB_TMP}/server.json")" \
+  "{\"type\":\"proxy\",\"url\":\"https://${SINGBOX_HY2_SNI}\",\"rewrite_host\":true}"
 SINGBOX_HY2_SALAMANDER=false sb_fn "$SB_INSTALL" render_singbox_config >"${SB_TMP}/server-plain.json"
 expect_ok "Salamander off: config still passes 'sing-box check'" sing-box check -c "${SB_TMP}/server-plain.json"
-expect_eq "Salamander off: no obfs in the Hysteria2 inbound" \
-  "$(jq -c '.inbounds[1] | has("obfs")' "${SB_TMP}/server-plain.json")" "false"
+expect_eq "Salamander off: no obfs, masquerade remains" \
+  "$(jq -c '.inbounds[1] | [has("obfs"), .masquerade.rewrite_host]' "${SB_TMP}/server-plain.json")" "[false,true]"
+
+# tune_network sets 8 MiB UDP _default and _max buffers (needed when Salamander wraps the socket) plus optional BBR.
+# shellcheck disable=SC2034,SC2329 # globals and sysctl stub read by sourced tune_network
+sb_tune_net() {
+  local bbr=$1
+  SINGBOX_ENABLE_BBR=$bbr
+  SYSCTL_CONF="${SB_TMP}/99-sing-box-${bbr}.conf"
+  LEGACY_BBR_CONF="${SB_TMP}/99-bbr-${bbr}.conf"
+  printf 'old\n' >"$LEGACY_BBR_CONF"
+  sysctl() {
+    case "$*" in
+      "--system") return 0 ;;
+      "-n net.ipv4.tcp_congestion_control") echo bbr ;;
+      "-n net.core.rmem_default" | "-n net.core.wmem_default") echo 8388608 ;;
+    esac
+  }
+  tune_network
+}
+expect_ok "tune_network configures UDP buffers and BBR when SINGBOX_ENABLE_BBR=true" vm_fn "$SB_INSTALL" sb_tune_net true
+expect_eq "tune_network writes rmem/wmem max+default and BBR, removing legacy 99-bbr.conf" \
+  "$(test -e "${SB_TMP}/99-bbr-true.conf" && echo kept || echo gone),$(grep -c '=' "${SB_TMP}/99-sing-box-true.conf"),$(grep -c 'rmem_default=8388608' "${SB_TMP}/99-sing-box-true.conf")" \
+  "gone,6,1"
+expect_ok "tune_network omits BBR when SINGBOX_ENABLE_BBR=false while keeping UDP buffers" vm_fn "$SB_INSTALL" sb_tune_net false
+expect_eq "tune_network writes only the 4 UDP buffer keys when BBR is off" \
+  "$(grep -c '=' "${SB_TMP}/99-sing-box-false.conf"),$(grep -c 'bbr' "${SB_TMP}/99-sing-box-false.conf")" "4,0"
 
 # Server logging defaults to warn: no per-connection lines (info and below record every client IP and destination).
 # It can be turned off entirely, or set to any level.
@@ -227,20 +446,20 @@ expect_ok "a changed SNI gets a cert valid for the new name" \
 
 expect_eq "VLESS-REALITY share URI" \
   "$(REALITY_PUBLIC_KEY=PUBKEY sb_fn "$SB_SHOW" vless_uri)" \
-  "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.yahoo.co.jp&fp=chrome&pbk=PUBKEY&sid=0123456789abcdef&type=tcp&headerType=none#netguru-reality"
+  "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SINGBOX_REALITY_SNI}&fp=chrome&pbk=PUBKEY&sid=0123456789abcdef&type=tcp&headerType=none#netguru-reality"
 expect_eq "Hysteria2 share URI carries the Salamander password and the cert pin" \
   "$(sb_fn "$SB_SHOW" hy2_uri)" \
-  "hysteria2://00112233445566778899aabbccddeeff@1.2.3.4:8443?obfs=salamander&obfs-password=ffeeddccbbaa99887766554433221100&sni=www.yahoo.co.jp&alpn=h3&insecure=1&pinSHA256=ABCDEF#netguru-hy2"
+  "hysteria2://00112233445566778899aabbccddeeff@1.2.3.4:8443?obfs=salamander&obfs-password=ffeeddccbbaa99887766554433221100&sni=${SINGBOX_HY2_SNI}&alpn=h3&insecure=1&pinSHA256=ABCDEF#netguru-hy2"
 expect_eq "Salamander off: the share URI has no obfs" \
   "$(SINGBOX_HY2_SALAMANDER=false sb_fn "$SB_SHOW" hy2_uri)" \
-  "hysteria2://00112233445566778899aabbccddeeff@1.2.3.4:8443?sni=www.yahoo.co.jp&alpn=h3&insecure=1&pinSHA256=ABCDEF#netguru-hy2"
+  "hysteria2://00112233445566778899aabbccddeeff@1.2.3.4:8443?sni=${SINGBOX_HY2_SNI}&alpn=h3&insecure=1&pinSHA256=ABCDEF#netguru-hy2"
 
 sb_fn "$SB_SHOW" client_outbounds >"${SB_TMP}/outbounds.json"
 jq '{outbounds: .}' "${SB_TMP}/outbounds.json" >"${SB_TMP}/client.json"
 expect_ok "client outbounds pass 'sing-box check'" sing-box check -c "${SB_TMP}/client.json"
 expect_eq "Hysteria2 client trusts only the pinned cert, never insecure" \
   "$(jq -c '.[1].tls | [has("insecure"), (.certificate | length > 0), .server_name]' "${SB_TMP}/outbounds.json")" \
-  '[false,true,"www.yahoo.co.jp"]'
+  "[false,true,\"${SINGBOX_HY2_SNI}\"]"
 expect_eq "REALITY client uses chrome uTLS and the server public key" \
   "$(jq -r '.[0].tls | [.utls.fingerprint, (.reality.public_key | length > 0)] | map(tostring) | join(",")' "${SB_TMP}/outbounds.json")" \
   "chrome,true"
@@ -265,9 +484,20 @@ expect_ok "client profile passes 'sing-box check' (1.14.2)" sing-box check -c "$
 expect_eq "client profile offers every service, REALITY by default" \
   "$(jq -c '.outbounds[0] | [.tag, .default, .outbounds]' "${SB_TMP}/profile.json")" \
   '["proxy","netguru-reality",["outline-0","outline-3","netguru-reality","netguru-hy2"]]'
-expect_eq "client profile sends private destinations direct, everything else through the proxy" \
-  "$(jq -c '.route | [(.rules[] | select(.ip_is_private) | .outbound), .final]' "${SB_TMP}/profile.json")" \
-  '["direct","proxy"]'
+expect_eq "client profile sends private and CN destinations direct, everything else through the proxy" \
+  "$(jq -c '.route | [(.rules[] | select(.ip_is_private) | .outbound), (.rules[] | select(.rule_set) | [.rule_set, .outbound]), .final, .default_domain_resolver, .default_http_client]' "${SB_TMP}/profile.json")" \
+  '["direct",[["geosite-cn","geoip-cn"],"direct"],"proxy","remote","via-proxy"]'
+expect_eq "bypass-CN profile splits DNS (geosite-cn -> AliDNS DoH, rest -> remote DoH via proxy)" \
+  "$(jq -c '.dns | [([.servers[] | [.tag, .server, (.detour // "direct")]]), .rules, .final]' "${SB_TMP}/profile.json")" \
+  '[[["remote","1.1.1.1","proxy"],["cn-dns","223.5.5.5","direct"]],[{"rule_set":["geosite-cn"],"server":"cn-dns"}],"remote"]'
+expect_eq "bypass-CN profile uses http_clients + cache_file and never deprecated download_detour or independent_cache" \
+  "$(jq -c '[.http_clients, .experimental.cache_file.enabled, (any(.route.rule_set[]; has("download_detour"))), (.dns | has("independent_cache"))]' "${SB_TMP}/profile.json")" \
+  '[[{"tag":"via-proxy","detour":"proxy"}],true,false,false]'
+CLIENT_BYPASS_CN=false client_profile <"${SB_TMP}/outbounds.json" >"${SB_TMP}/profile-full.json"
+expect_ok "full-tunnel client profile passes 'sing-box check'" sing-box check -c "${SB_TMP}/profile-full.json"
+expect_eq "full-tunnel client profile has no remote rule-sets, no local/CN DNS, remote resolver, and cache_file enabled" \
+  "$(jq -c '[([.dns.servers[].tag]), (.route | has("rule_set")), .route.default_domain_resolver, .experimental.cache_file.enabled]' "${SB_TMP}/profile-full.json")" \
+  '[["remote"],false,"remote",true]'
 expect_eq "client profile defaults to the first server when REALITY is absent" \
   "$(vm_fn "$OUTLINE_SHOW" keys_to_outbounds 1.2.3.4 <"${FIXTURES}/outline-access-keys.json" | client_profile | jq -r '.outbounds[0].default')" \
   "outline-0"

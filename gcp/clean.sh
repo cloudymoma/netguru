@@ -11,6 +11,7 @@ for v in GCP_PROJECT GCP_REGION GCP_ZONE VM_NAME NETWORK_NAME NETWORK_TAG STATIC
   require_not_tbd "$v" "${!v}"
 done
 PROFILE_FILE="${NETGURU_ROOT}/netguru-client.json"
+FULL_PROFILE_FILE="${NETGURU_ROOT}/netguru-client-full.json"
 
 # --- what exists, and is it netguru's? (read-only) ---------------------------------------------------------------
 vm="" disk="" ip="" net="" keep="" subnet=no
@@ -49,7 +50,7 @@ plan() {
   if [[ -n "$net" && -z "$keep" && "$subnet" == yes ]]; then echo "  - subnet ${NETWORK_NAME} (${GCP_REGION}) and VPC ${NETWORK_NAME}"; fi
   if [[ -n "$net" && -z "$keep" && "$subnet" == no ]]; then echo "  - VPC ${NETWORK_NAME}"; fi
   if [[ -n "$keep" ]]; then echo "  (VPC ${NETWORK_NAME} stays: ${keep})"; fi
-  echo "It leaves the iap.googleapis.com API enabled (other things in the project may use it), and ${PROFILE_FILE}."
+  echo "It leaves the iap.googleapis.com API enabled (other things in the project may use it), ${PROFILE_FILE} and ${FULL_PROFILE_FILE}."
 }
 
 if [[ -z "${vm}${disk}${ip}${rules}" && ( -z "$net" || -n "$keep" ) ]]; then

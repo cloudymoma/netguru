@@ -56,8 +56,17 @@ echo '[{"type":"shadowsocks","tag":"outline-0","server":"203.0.113.100","server_
 STUB
 chmod +x "$SHOW_TMP/bin/gcloud"
 printf 'previous\n' >"$SHOW_TMP/netguru-client.json"
+printf 'previous-full\n' >"$SHOW_TMP/netguru-client-full.json"
 expect_fail "make show fails when one service's SSH fails" env PATH="$SHOW_TMP/bin:$PATH" "$SHOW_TMP/gcp/show.sh"
 expect_eq   "a failed make show leaves the previous profile untouched" "$(cat "$SHOW_TMP/netguru-client.json")" "previous"
+expect_eq   "a failed make show leaves the fallback profile untouched" "$(cat "$SHOW_TMP/netguru-client-full.json")" "previous-full"
+sed -i 's/^SINGBOX_ENABLED=.*/SINGBOX_ENABLED="false"/' "$SHOW_TMP/gcp/config.env"
+expect_ok   "make show succeeds when all enabled services answer" env PATH="$SHOW_TMP/bin:$PATH" "$SHOW_TMP/gcp/show.sh"
+expect_ok   "make show writes a valid primary bypass-CN profile (0600)" \
+  bash -c "[[ \$(stat -c %a '$SHOW_TMP/netguru-client.json') == 600 ]] && sing-box check -c '$SHOW_TMP/netguru-client.json' && jq -e '.route.rule_set | length == 2' '$SHOW_TMP/netguru-client.json'"
+expect_ok   "make show also writes a valid full-tunnel fallback profile (0600)" \
+  bash -c "[[ \$(stat -c %a '$SHOW_TMP/netguru-client-full.json') == 600 ]] && sing-box check -c '$SHOW_TMP/netguru-client-full.json' && jq -e '(.route | has(\"rule_set\")) | not' '$SHOW_TMP/netguru-client-full.json'"
+sed -i 's/^SINGBOX_ENABLED=.*/SINGBOX_ENABLED="true"/' "$SHOW_TMP/gcp/config.env"
 # The Makefile takes SERVICES from lib.sh: switching Outline on adds its deploy step, first.
 expect_eq   "with Outline switched on, make all deploys it first" \
   "$(make -s -C "$SHOW_TMP" -n all | grep -oE 'gcp/(infra|deploy|show)\.sh( [a-z-]+)?' | tr '\n' '|')" \

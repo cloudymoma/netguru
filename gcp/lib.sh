@@ -118,6 +118,7 @@ validate_config() {
   for v in GCP_PROJECT GCP_REGION GCP_ZONE VM_NAME NETWORK_NAME SUBNET_RANGE NETWORK_TAG STATIC_IP_NAME IAP_SOURCE_RANGE; do
     require_not_tbd "$v" "${!v}"
   done
+  require_bool CLIENT_BYPASS_CN "${CLIENT_BYPASS_CN}"
   for s in $(known_services); do
     v=$(service_switch "$s")
     require_bool "$v" "${!v:-}"
@@ -152,25 +153,37 @@ quay_tag_digest() {
 }
 
 # --- client profile -------------------------------------------------------------
-# client_profile — stdin: JSON array of sing-box outbounds (SHOW_FORMAT=json); stdout: a complete sing-box
-# client profile for SFI/SFA/SFM: TUN, DNS over HTTPS through the proxy, private destinations direct,
-# and a "proxy" selector over every server (REALITY by default).
+# client_profile — stdin: JSON array of sing-box outbounds (SHOW_FORMAT=json); stdout: a complete sing-box 1.14+
+# client profile for SFI/SFA/SFM: TUN, DNS over HTTPS through the proxy (plus AliDNS DoH + cached CN rule-sets when
+# CLIENT_BYPASS_CN=true), private destinations direct, and a "proxy" selector over every server (REALITY by default).
 client_profile() {
   local outbounds
   outbounds=$(cat)
   jq -e 'length > 0' <<<"$outbounds" >/dev/null || die "no client outbounds: is any service installed?"
-  jq '{
-    log: {level: "warn"},
-    dns: {servers: [{type: "https", tag: "remote", server: "1.1.1.1", detour: "proxy"}, {type: "local", tag: "local"}],
-          final: "remote"},
-    inbounds: [{type: "tun", tag: "tun-in", address: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
-                auto_route: true, strict_route: true}],
-    outbounds: ([{type: "selector", tag: "proxy", outbounds: map(.tag),
-                  default: ((map(select(.type == "vless") | .tag) + map(.tag))[0])}]
-                + . + [{type: "direct", tag: "direct"}]),
-    route: {rules: [{action: "sniff"}, {protocol: "dns", action: "hijack-dns"}, {ip_is_private: true, outbound: "direct"}],
-            final: "proxy", auto_detect_interface: true, default_domain_resolver: "local"}
-  }' <<<"$outbounds"
+  jq --argjson bypass_cn "${CLIENT_BYPASS_CN}" '
+    def rs($tag; $repo): {type: "remote", tag: $tag, format: "binary",
+                          url: "https://raw.githubusercontent.com/SagerNet/\($repo)/rule-set/\($tag).srs"};
+    ({
+      log: {level: "warn"},
+      dns: ({servers: ([{type: "https", tag: "remote", server: "1.1.1.1", detour: "proxy"}]
+                       + if $bypass_cn then [{type: "https", tag: "cn-dns", server: "223.5.5.5"}] else [] end),
+             final: "remote"}
+            + if $bypass_cn then {rules: [{rule_set: ["geosite-cn"], server: "cn-dns"}]} else {} end),
+      inbounds: [{type: "tun", tag: "tun-in", address: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+                  auto_route: true, strict_route: true}],
+      outbounds: ([{type: "selector", tag: "proxy", outbounds: map(.tag),
+                    default: ((map(select(.type == "vless") | .tag) + map(.tag))[0])}]
+                  + . + [{type: "direct", tag: "direct"}]),
+      route: ({rules: ([{action: "sniff"}, {protocol: "dns", action: "hijack-dns"},
+                        {ip_is_private: true, outbound: "direct"}]
+                       + if $bypass_cn then [{rule_set: ["geosite-cn", "geoip-cn"], outbound: "direct"}] else [] end),
+               final: "proxy", auto_detect_interface: true, default_domain_resolver: "remote"}
+              + if $bypass_cn then {default_http_client: "via-proxy",
+                                    rule_set: [rs("geosite-cn"; "sing-geosite"), rs("geoip-cn"; "sing-geoip")]}
+                else {} end),
+      experimental: {cache_file: {enabled: true}}
+    } + if $bypass_cn then {http_clients: [{tag: "via-proxy", detour: "proxy"}]} else {} end)
+  ' <<<"$outbounds"
 }
 
 # write_client_profile FILE — stdin: as client_profile; write the profile to FILE, readable only by the owner.

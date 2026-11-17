@@ -41,7 +41,7 @@
    make all
    ```
 
-   這些指令會下載 netguru、把你的專案 ID 寫入 [`gcp/config.env`](gcp/config.env)、啟用 Compute Engine API 並建置你的伺服器，整個過程需要幾分鐘。完成後會顯示伺服器的 IP 位址、一個 `vless://` 連結、一個 `hysteria2://` 連結，以及 `netguru-client.json` 的路徑；這個檔案是給 sing-box App 使用的現成設定檔。
+   這些指令會下載 netguru、把你的專案 ID 寫入 [`gcp/config.env`](gcp/config.env)、啟用 Compute Engine API 並建置你的伺服器，整個過程需要幾分鐘。完成後會顯示伺服器的 IP 位址、一個 `vless://` 連結、一個 `hysteria2://` 連結，以及 `netguru-client.json`（和 `netguru-client-full.json`）的路徑；這些檔案是給 sing-box App（1.14.0 以上版本）使用的現成設定檔。
 
 如果有步驟失敗，請先參閱[疑難排解](#疑難排解)，然後再貼上一次這些指令：每個步驟都可以安全地重複執行（`git clone` 只會提示資料夾已經存在）。
 
@@ -49,14 +49,14 @@
 
 ### 3. 連接你的裝置
 
-1. 從 [sing-box 下載頁面](https://sing-box.sagernet.org/zh/clients/)安裝官方的 **sing-box** App：iPhone、iPad 和 Mac 請用 App Store（需要中國大陸以外地區的 Apple 帳號）；Android 可用 Google Play、F-Droid 或 GitHub；Windows 和 Linux 請從 GitHub 下載。
+1. 從 [sing-box 下載頁面](https://sing-box.sagernet.org/zh/clients/)安裝官方的 **sing-box** App（**1.14.0 以上版本**）：iPhone、iPad 和 Mac 請用 App Store（需要中國大陸以外地區的 Apple 帳號）；Android 可用 Google Play、F-Droid 或 GitHub；Windows 和 Linux 請從 GitHub 下載。
 2. 在 Cloud Shell 執行下列指令下載設定檔，瀏覽器會把它存到「下載」資料夾：
 
    ```bash
    cloudshell download ~/netguru/netguru-client.json
    ```
 
-   如果要在手機上使用，請用私密的方式傳過去，例如 AirDrop 或 USB 傳輸線。
+   如果要在手機上使用，請用私密的方式傳過去，例如 AirDrop 或 USB 傳輸線。更新設定檔時，請先在一台裝置上測試，再推廣到其他裝置。（`netguru-client-full.json` 是全流量備用設定檔，首次啟動時不需下載規則集——如果 `netguru-client.json` 尚未快取規則集而 `netguru-reality` 又無法連線，可改用這個檔案。）
 3. 在 App 中依序點選 **設定檔 → 新增設定檔 → 本地 → 匯入**（英文介面為 **Profiles → New Profile → Local → Import**）並選取該檔案，然後在**儀表**（Dashboard）頁面啟動。第一次啟動時請允許系統的權限要求：App 需要這項權限，才能讓流量經由代理傳送。
 4. 檢查方式：開啟 https://ipinfo.io 之類的網站，畫面上應該會顯示 `make all` 印出的 IP 位址。
 
@@ -73,7 +73,7 @@
 
 | 指令 | 用途 |
 |---|---|
-| `make show` | 再次顯示你的連結，並重新產生 `netguru-client.json`。**內含機密資訊。** |
+| `make show` | 再次顯示你的連結，並重新產生 `netguru-client.json` 與 `netguru-client-full.json`。**內含機密資訊。** |
 | `make all` | 修改 `gcp/config.env` 後套用變更。隨時都可以安全地執行。 |
 | `make upgrade` | 將伺服器上的 sing-box（以及已開啟的 Outline）更新到最新版本。 |
 | `make update-ip CONFIRM=1` | 為伺服器更換新的 IP 位址，例如舊位址遭到封鎖時。之後每台裝置都必須重新匯入新的設定檔或連結，指令最後會顯示它們。 |
@@ -84,11 +84,11 @@
 更多細節：
 
 - `make all` 會建立或修復基礎架構、安裝（或接管）每個已開啟的服務、停止已關閉的服務，最後執行 `make show`。`make infra` 只執行基礎架構步驟；`make sing-box` 和 `make outline` 則會在基礎架構步驟之外，再部署單一服務。
-- `make show` 會顯示 `vless://` 和 `hysteria2://` 連結（開啟 Outline 時另有 `ss://` 金鑰），並把給 SFI/SFA/SFM 使用的 sing-box 設定檔寫入 `netguru-client.json`（權限 600，已列入 git 忽略清單）；只有在每個服務都有回應時才會取代舊檔案。
+- `make show` 會顯示 `vless://` 和 `hysteria2://` 連結（開啟 Outline 時另有 `ss://` 金鑰），並把兩個給 SFI/SFA/SFM 使用的 sing-box 1.14+ 設定檔寫入本機（權限 600，已列入 git 忽略清單），只有在每個服務都有回應時才會取代舊檔案：`netguru-client.json`（依 `CLIENT_BYPASS_CN` 設定）與 `netguru-client-full.json`（固定為全流量代理，首次啟動不需下載規則集）。
 - `make upgrade` 會把 sing-box 升級到 `SINGBOX_VERSION`（預設為最新版），並在 Outline 開啟時將它更新到目前的 `stable` 映像檔；已是最新版本時不會做任何變更。`make upgrade-sing-box` 和 `make upgrade-outline` 只升級單一服務。如果服務已關閉，這些目標會立即停止，並指出需要設定哪個開關。
 - `make update-ip`：如果最後的重新同步失敗，請執行 `make all` 完成；再次執行 `update-ip` 會再換一次 IP。
-- `make verify` 會從執行它的地方檢查：每條通道、中繼資料伺服器是否已封鎖、哪些連接埠開啟或關閉、主動掃描者會看到什麼（REALITY 連接埠回應的是真實網站的憑證；沒有 Salamander 密碼的 Hysteria2 探測得不到任何回應）、VM 和防火牆設定，以及已關閉的服務沒有殘留任何規則。
-- `make clean` 會刪除 VM 及其磁碟（連同所有金鑰和憑證）、靜態 IP、netguru 的防火牆規則、子網路和 VPC。如果 VM 或靜態 IP 看起來不屬於 netguru，它會拒絕執行；如果有 netguru 以外的資源在使用該 VPC，就會保留 VPC；IAP API 會維持啟用，你本機的 `netguru-client.json` 也會保留。
+- `make verify` 會從執行它的地方檢查：每條通道、中繼資料伺服器是否已封鎖、哪些連接埠開啟或關閉、主動掃描者會看到什麼（REALITY 連接埠以 TLS 1.3 + X25519 + HTTP/2 回應真實網站憑證、拒絕不相關的主機名稱、將與真實網站的 TCP 關閉差異列為警告，且沒有 Salamander 密碼的 Hysteria2 探測得不到任何回應）、VM 和防火牆設定，以及已關閉的服務沒有殘留任何規則。
+- `make clean` 會刪除 VM 及其磁碟（連同所有金鑰和憑證）、靜態 IP、netguru 的防火牆規則、子網路和 VPC。如果 VM 或靜態 IP 看起來不屬於 netguru，它會拒絕執行；如果有 netguru 以外的資源在使用該 VPC，就會保留 VPC；IAP API 會維持啟用，你本機的 `netguru-client*.json` 檔案也會保留。
 - `make test` 會執行 shellcheck 和離線單元測試，不需要存取 GCP。
 
 ## 設定
@@ -96,13 +96,15 @@
 所有設定都在 [`gcp/config.env`](gcp/config.env) 中，預設值即可直接使用：唯一必須設定的是 `GCP_PROJECT`，快速入門已經幫你設定好了。修改任何設定後，請執行 `make all`。在 Cloud Shell 中執行 `cloudshell edit ~/netguru/gcp/config.env`，即可用編輯器開啟這個檔案。
 
 - `GCP_PROJECT`：你的專案 ID（也可以在每次執行時指定：`GCP_PROJECT=my-project make all`）。
-- `GCP_REGION`、`GCP_ZONE`：VM 所在的區域和可用區。請在第一次部署前決定；如要搬移現有的 VM，請先執行 `make clean`（之後每個用戶端都需要新的金鑰和 IP）。如果搬到日本以外，也請把 `SINGBOX_REALITY_SNI` 改為新區域附近、支援 TLS 1.3 和 HTTP/2 的知名網站，並避開 `www.apple.com` 這類常被濫用的預設值。安裝程式會檢查 TLS 1.3 和 HTTP/2，缺少任一項就會停止。
+- `GCP_REGION`、`GCP_ZONE`：VM 所在的區域和可用區。請在第一次部署前決定；如要搬移現有的 VM，請先執行 `make clean`（之後每個用戶端都需要新的金鑰和 IP）。如果搬到日本以外，也請把 `SINGBOX_REALITY_SNI` 改為新區域附近、你的網路可正常連線、以自有基礎架構提供 TLS 1.3、HTTP/2 與 X25519（不使用 Cloudflare 或 Akamai 等共用 CDN）的網站，並避開 `www.apple.com` 這類常被濫用的預設值。安裝程式會檢查 TLS 1.3、HTTP/2、X25519，並確認目標 IP 不會對不相關的主機名稱回傳有效憑證。
 - `VM_NAME`、`NETWORK_NAME`、`NETWORK_TAG`、`STATIC_IP_NAME`：只有在第一次部署前、而且與現有資源衝突時才需要修改。`VM_MACHINE_TYPE`、`VM_DISK_*`、`VM_IMAGE_*` 和 `SUBNET_RANGE` 只在資源首次建立時生效。
 - `OUTLINE_ENABLED`、`SINGBOX_ENABLED`：每個服務各有一個開關。Outline 預設關閉：它的 Shadowsocks 流量很容易被審查者辨識出特徵，而 VM 的 IP 一旦遭到封鎖，REALITY 和 Hysteria2 也會一併中斷。在已部署的 VM 上關閉某個服務後，`make all`（或 `make infra`）會刪除它的防火牆規則並停止該服務；它的金鑰和憑證會保留在 VM 上（`/opt/outline`、`/etc/sing-box`），所以重新開啟後，用戶端設定仍然相同。開啟 Outline 時，請把它的 `ss://` 金鑰匯入 [Outline 用戶端](https://getoutline.org/zh-TW/)。
-- `SINGBOX_HY2_SALAMANDER`：預設為 `true`。每個 Hysteria2 封包都會經過混淆，因此沒有混淆密碼（obfs password）的探測得不到任何回應，也看不到伺服器的自簽憑證。每個 Hysteria2 用戶端都必須支援 Salamander 並具備混淆密碼（兩者都在 `make show` 的輸出中）；只有在用戶端不支援時才設為 `false`。切換這項設定會改變 Hysteria2 的用戶端設定，請從 `make show` 重新匯入。代價是 CPU：每 GB 的 Hysteria2 流量約耗用 3 倍的伺服器 CPU 和 2 倍的用戶端 CPU（REALITY 不受影響）。
+- `SINGBOX_REALITY_MAX_TIME_DIFF`：預設為 `1m`（設為 `""` 則停用）。拒絕裝置時間與伺服器相差超過 1 分鐘的 REALITY 交握，使延遲重放的封包回落至 `SINGBOX_REALITY_SNI`。時間不準的裝置連 REALITY 會出現 `reality verification failed`，但 Hysteria2 仍可正常運作。
+- `SINGBOX_HY2_SALAMANDER`：預設為 `true`。每個 Hysteria2 封包都會經過混淆，因此沒有混淆密碼（obfs password）的探測得不到任何回應（表現與遭防火牆過濾的 UDP 連接埠相同），也看不到伺服器的自簽憑證。每個 Hysteria2 用戶端都必須支援 Salamander 並具備混淆密碼（兩者都在 `make show` 的輸出中）；只有在用戶端不支援時才設為 `false`——**關閉 Salamander 後，主動探測即可偵測到 Hysteria2**（即使未通過驗證的 HTTP/3 請求會反向代理到 `SINGBOX_HY2_SNI`，自簽憑證仍會曝光）。切換這項設定會改變 Hysteria2 的用戶端設定，請從 `make show` 重新匯入。代價是 CPU：每 GB 的 Hysteria2 流量約耗用 3 倍的伺服器 CPU 和 2 倍的用戶端 CPU（REALITY 不受影響）。
+- `CLIENT_BYPASS_CN`：預設為 `true`。在 `netguru-client.json`（需要 sing-box 1.14.0+）中，中國大陸網域與 IP（`geosite-cn`、`geoip-cn`）會搭配 AliDNS DoH（`223.5.5.5`）直接連線，避免境內流量繞經 VM 往返跨境；規則集會透過代理下載並在本機快取供重啟使用。請注意，`geosite-cn` 也包含在中國境內提供服務的部分外國網域（例如 `www.gstatic.com` 與 `fonts.googleapis.com`）。設為 `false`（或改匯入 `netguru-client-full.json`）則會讓所有非私人位址流量都經由代理傳送。
 - `SINGBOX_LOG_ENABLED`、`SINGBOX_LOG_LEVEL`：sing-box 伺服器日誌，預設開啟，等級為 `warn`。在 `warn` 等級下不會記錄使用者的連線；DNS 查詢或連線失敗時會記錄目的地，但不含用戶端 IP；每次對 REALITY 連接埠的未經驗證探測都會記錄一行，包含探測者的 IP，可藉此發現主動探測。`info`、`debug` 和 `trace` 會記錄每條連線的用戶端 IP 和目的地，請只在疑難排解時短暫使用。即使關閉日誌，啟動失敗仍會回報（並由 `make all` 顯示）。
 - `SINGBOX_VERSION`：`latest`（預設）或固定版本 `X.Y.Z`，會在首次部署和執行 `make upgrade` 時安裝。
-- `SINGBOX_ENABLE_BBR`：設為 `true`（預設）時，會在 VM 上開啟 BBR 壅塞控制，讓 TCP 更快。
+- `SINGBOX_ENABLE_BBR`：設為 `true`（預設）時，會在 VM 上開啟 BBR 壅塞控制，讓 TCP 更快（供 Hysteria2 使用的 8 MiB UDP 緩衝區則一律會設定）。
 - 連接埠：任何未使用的連接埠都可以，但不能有前導零。`tcp:22` 保留給 SSH，連接埠衝突會被拒絕。Outline 安裝後就不能再修改 `OUTLINE_API_PORT` 和 `OUTLINE_KEYS_PORT`：它現有的金鑰會留在舊的連接埠上。
 - `OUTLINE_INSTALLER_URL`、`OUTLINE_INSTALLER_SHA256`、`SINGBOX_GPG_FINGERPRINT`：用來確保下載內容真實可信的固定值。只有在自行獨立驗證過新值之後才可以修改。
 - `IAP_SOURCE_RANGE`：請保持原樣，詳見[下方說明](#ssh-存取與-iap_source_range)。
@@ -122,7 +124,7 @@
 
 除了你在快速入門中啟用的 Compute Engine API（會連帶啟用 OS Login API）之外，netguru 只會啟用 IAP API（`iap.googleapis.com`），不會變更專案中的其他任何設定。`make clean` 會再次移除上述所有資源；API 則維持啟用。
 
-「安全強化」是指：SSH 只能透過 Google 的 Identity-Aware Proxy 連線，無法從網際網路直接連入；VM 上沒有任何雲端憑證；sing-box 會拒絕連往私人位址和雲端中繼資料伺服器；並且已開啟安全啟動、OS 登入和防刪除功能。
+「安全強化」是指：SSH 只能透過 Google 的 Identity-Aware Proxy 連線，無法從網際網路直接連入；VM 上沒有任何雲端憑證；sing-box 會拒絕連往私人位址和雲端中繼資料伺服器（並對純文字 BitTorrent 提供盡力而為的攔截保護）；並且已開啟安全啟動、OS 登入和防刪除功能。
 
 ## 在自己的電腦上執行
 
@@ -142,7 +144,10 @@
 | `jq: command not found` | 安裝 jq：Debian 或 Ubuntu 執行 `sudo apt-get install -y jq`，Mac 執行 `brew install jq`。 |
 | `latest GitHub release is not a stable X.Y.Z release (got '')` | GitHub 的 API 沒有回應，通常是因為速率限制。請等幾分鐘再執行 `make all`，或將 `SINGBOX_VERSION` 設為固定版本。 |
 | `newest signed sing-box in apt is ... retry later` | sing-box 的新版本還沒進入它的套件庫。請稍候再執行 `make all`。 |
-| `cannot reach REALITY target ...` 或 `... must speak HTTP/2 over TLS 1.3` | 改用其他 `SINGBOX_REALITY_SNI`（請參閱[設定](#設定)）。 |
+| `cannot reach REALITY target ...`、`... must speak HTTP/2 over TLS 1.3`，或 `... serves a valid certificate for unrelated hostname ...` | 改用其他位於專用基礎架構上的 `SINGBOX_REALITY_SNI`（請參閱[設定](#設定)）。 |
+| `VM clock is not NTP-synchronized` | 剛建立的 VM 請稍候片刻再執行一次 `make all`，或修復 VM 上的 NTP，或在 `gcp/config.env` 中設為 `SINGBOX_REALITY_MAX_TIME_DIFF=""`。 |
+| 裝置端出現 `reality verification failed` | 裝置時間與伺服器相差超過 `SINGBOX_REALITY_MAX_TIME_DIFF`（預設 1 分鐘），或設定檔仍使用舊金鑰（例如執行過 `make clean` 之後）。請開啟裝置的自動設定日期與時間（在此之前可在**群組**／Groups 頁面將 `proxy` 切換為 `netguru-hy2`，Hysteria2 仍可正常連線）；如果時間無誤，請從 `make show` 重新匯入設定檔。 |
+| 首次啟動 `netguru-client.json` 時因 `initialize rule-set` 而結束 | 無法連上 `netguru-reality` 來下載初始規則集。請改匯入 `netguru-client-full.json`（不需下載規則集），並在**群組**（Groups）頁面將 `proxy` 切換為 `netguru-hy2`。 |
 | `SSH over IAP to netguru-server not available after 150s` | 請參閱 [SSH 存取](#ssh-存取與-iap_source_range)。 |
 | 之前可以用，現在連不上 | 在 App 的**群組**（Groups）頁面，將 `proxy` 在 `netguru-reality` 和 `netguru-hy2` 之間切換。如果兩者都不行，可能是 IP 位址遭到封鎖：請執行 `make update-ip CONFIRM=1`，並在每台裝置上重新匯入。 |
 

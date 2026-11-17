@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Print client configs for every enabled service (spec §4.5, §4.6).
-# SHOW_FORMAT=text (default) for humans, also writing the sing-box client profile to netguru-client.json in the repo root;
+# SHOW_FORMAT=text (default) for humans, also writing the sing-box client profiles to netguru-client.json and
+# netguru-client-full.json in the repo root;
 # SHOW_FORMAT=json for a JSON array of sing-box outbounds.
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -8,7 +9,9 @@ set -euo pipefail
 
 SHOW_FORMAT=${SHOW_FORMAT:-text}
 [[ "$SHOW_FORMAT" == text || "$SHOW_FORMAT" == json ]] || die "SHOW_FORMAT must be text or json (got '${SHOW_FORMAT}')"
+require_bool CLIENT_BYPASS_CN "${CLIENT_BYPASS_CN}"
 PROFILE_FILE="${NETGURU_ROOT}/netguru-client.json"
+FULL_PROFILE_FILE="${NETGURU_ROOT}/netguru-client-full.json"
 STATIC_IP=$(get_static_ip)
 require_ipv4 STATIC_IP "${STATIC_IP}"
 
@@ -39,6 +42,9 @@ for s in ${SERVICES}; do
 done
 outbounds=$(all_outbounds) # all services or nothing: a partial profile would silently drop servers
 write_client_profile "${PROFILE_FILE}" <<<"$outbounds"
+CLIENT_BYPASS_CN=false write_client_profile "${FULL_PROFILE_FILE}" <<<"$outbounds"
 echo
-echo "== sing-box client profile (SFI/SFA/SFM; contains secrets): ${PROFILE_FILE}"
-echo "   Import it: Profiles → New Profile → Local → Import, or paste it into Edit Content"
+echo "== sing-box client profiles (SFI/SFA/SFM 1.14+; contain secrets):"
+echo "   ${PROFILE_FILE} (default; CLIENT_BYPASS_CN=${CLIENT_BYPASS_CN})"
+echo "   ${FULL_PROFILE_FILE} (full-tunnel fallback, no rule-set download on first start)"
+echo "   Import: Profiles → New Profile → Local → Import, or paste into Edit Content"
