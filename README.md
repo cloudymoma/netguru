@@ -244,7 +244,7 @@ You can also run netguru from a Linux or Mac terminal instead of Cloud Shell (on
   then run `gcloud services enable compute.googleapis.com --project=YOUR_PROJECT_ID` and `make all`.
 - **For `make verify`:** also nc, python3 and [sing-box](https://github.com/SagerNet/sing-box/releases) on `PATH`
   (tested with 1.14.2).
-- **For `make test`:** also shellcheck, openssl, gpg and sing-box.
+- **For `make test`:** also shellcheck 0.11 or newer, openssl, gpg, ar (from binutils) and sing-box.
 
 ## Troubleshooting
 

@@ -134,7 +134,7 @@
 
 - **部署和管理：** 需要 bash、make、[gcloud CLI](https://cloud.google.com/sdk/docs/install?hl=zh-tw)（已用 `gcloud auth login` 登入）、jq 和 curl。複製（clone）這個存放區，用文字編輯器設定 `gcp/config.env` 中的 `GCP_PROJECT`，然後執行 `gcloud services enable compute.googleapis.com --project=YOUR_PROJECT_ID` 和 `make all`。
 - **`make verify`：** 另外需要 nc、python3，以及位於 `PATH` 中的 [sing-box](https://github.com/SagerNet/sing-box/releases)（已用 1.14.2 測試）。
-- **`make test`：** 另外需要 shellcheck、openssl、gpg 和 sing-box。
+- **`make test`：** 另外需要 shellcheck（0.11 以上版本）、openssl、gpg、ar（包含在 binutils 中）和 sing-box。
 
 ## 疑難排解
 
