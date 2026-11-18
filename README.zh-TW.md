@@ -89,7 +89,7 @@
 - `make update-ip`：如果最後的重新同步失敗，請執行 `make all` 完成；再次執行 `update-ip` 會再換一次 IP。
 - `make verify` 會從執行它的地方檢查：每條通道、中繼資料伺服器是否已封鎖、哪些連接埠開啟或關閉、主動掃描者會看到什麼（REALITY 連接埠以 TLS 1.3 + X25519 + HTTP/2 回應真實網站憑證、拒絕不相關的主機名稱、將與真實網站的 TCP 關閉差異列為警告，且沒有 Salamander 密碼的 Hysteria2 探測得不到任何回應）、VM 和防火牆設定，以及已關閉的服務沒有殘留任何規則。
 - `make clean` 會刪除 VM 及其磁碟（連同所有金鑰和憑證）、靜態 IP、netguru 的防火牆規則、子網路和 VPC。如果 VM 或靜態 IP 看起來不屬於 netguru，它會拒絕執行；如果有 netguru 以外的資源在使用該 VPC，就會保留 VPC；IAP API 會維持啟用，你本機的 `netguru-client*.json` 檔案也會保留。
-- `make test` 會執行 shellcheck 和離線單元測試，不需要存取 GCP。
+- `make test` 會執行 shellcheck 和離線單元測試，不需要存取 GCP；`make test-upstream`（Linux）另會驗證 SagerNet 目前的 GPG 簽章金鑰，並以最新簽署的穩定版與測試版 `sing-box` 套件執行測試（不會安裝到系統中）。
 
 ## 設定
 
@@ -102,6 +102,8 @@
 - `SINGBOX_REALITY_MAX_TIME_DIFF`：預設為 `1m`（設為 `""` 則停用）。拒絕裝置時間與伺服器相差超過 1 分鐘的 REALITY 交握，使延遲重放的封包回落至 `SINGBOX_REALITY_SNI`。時間不準的裝置連 REALITY 會出現 `reality verification failed`，但 Hysteria2 仍可正常運作。
 - `SINGBOX_HY2_SALAMANDER`：預設為 `true`。每個 Hysteria2 封包都會經過混淆，因此沒有混淆密碼（obfs password）的探測得不到任何回應（表現與遭防火牆過濾的 UDP 連接埠相同），也看不到伺服器的自簽憑證。每個 Hysteria2 用戶端都必須支援 Salamander 並具備混淆密碼（兩者都在 `make show` 的輸出中）；只有在用戶端不支援時才設為 `false`——**關閉 Salamander 後，主動探測即可偵測到 Hysteria2**（即使未通過驗證的 HTTP/3 請求會反向代理到 `SINGBOX_HY2_SNI`，自簽憑證仍會曝光）。切換這項設定會改變 Hysteria2 的用戶端設定，請從 `make show` 重新匯入。代價是 CPU：每 GB 的 Hysteria2 流量約耗用 3 倍的伺服器 CPU 和 2 倍的用戶端 CPU（REALITY 不受影響）。
 - `CLIENT_BYPASS_CN`：預設為 `true`。在 `netguru-client.json`（需要 sing-box 1.14.0+）中，中國大陸網域與 IP（`geosite-cn`、`geoip-cn`）會搭配 AliDNS DoH（`223.5.5.5`）直接連線，避免境內流量繞經 VM 往返跨境；規則集會透過代理下載並在本機快取供重啟使用。請注意，`geosite-cn` 也包含在中國境內提供服務的部分外國網域（例如 `www.gstatic.com` 與 `fonts.googleapis.com`）。設為 `false`（或改匯入 `netguru-client-full.json`）則會讓所有非私人位址流量都經由代理傳送。
+- `CLIENT_AUTO_FAILOVER`：預設為 `false`。設為 `true` 且至少有兩個伺服器出站時，產生的兩個用戶端設定檔都會加入 `auto`（`urltest`）群組（`interval: 5m`、`idle_timeout: 5m`、`tolerance: 5000ms`）：預設優先使用 REALITY，若 REALITY 中斷會在約 5 分鐘內自動切換至 Hysteria2，並維持在 Hysteria2 直到它也失效或 App 重新啟動。你仍可在**群組**／Groups 頁面手動指定個別伺服器，但手動選定的伺服器在重新啟動或重新匯入設定檔後仍會保留，這段期間自動切換不會生效：只要裝置上曾手動切換過 `proxy`，匯入後請選一次 `auto`，之後每次手動切換完也要選回 `auto`。預設關閉是因為開啟後，只要有流量經過通道（手機的背景流量通常不會間斷），探測就會喚醒原本完全靜默的 Hysteria2 UDP 連接埠：啟動時一次、閒置滿 5 分鐘後再次使用時一次，持續使用時約每 10 分鐘一次。sing-box 1.14.4 每次探測會送出一波約 50–60 個封包（30–35 KB），期間不會送出其他封包（超過 `idle_timeout` 後完全停止）；而 1.14.2 除此之外還會每 10 秒送出 2 個保活封包，且在停止探測後仍會持續。若首次啟動 `netguru-client.json` 時無法連上 REALITY，開啟此選項仍需改匯入 `netguru-client-full.json`，匯入後它會自行改走 Hysteria2。
+- `CLIENT_SERVER_HOST`：預設為 `""`（關閉）。可設為你自行掌控的網域名稱（**僅設定指向 VM 靜態 IP 的 `A` 記錄**，並使用較短的 TTL，例如 60–300 秒），讓產生的兩個設定檔改以網域名稱連線，而非直接寫死 IP（`vless://`、`hysteria2://` 與 `ss://` 分享連結仍維持使用 IP）。更換 IP 後，使用 `netguru-client*.json` 的裝置不需重新匯入：TTL 到期後的第一次請求就會讓 REALITY 恢復連線；若舊 IP 的封包遭靜默丟棄，Hysteria2 則會在約 30 秒後恢復。**隱私與封鎖代價：** DoH（`223.5.5.5`，`ipv4_only`）只保護裝置到 AliDNS 這一段；AliDNS 接著會查詢你網域的權威名稱伺服器，如果權威伺服器位於中國大陸境外，該筆查詢會以明文跨境傳送。任何監看跨境 DNS 的人都能順著這個名稱追蹤到每一次更換的新 IP（失去全新 IP 原本具備的隱蔽性）；一旦網域名稱本身遭到 DNS 汙染，所有裝置仍必須重新匯入新的設定檔。此外，通道也會因此依賴 AliDNS：連不上 `223.5.5.5` 時，快取的解析結果一過期，新的 REALITY 連線就會失敗（Hysteria2 則是在需要重新連線時才會受影響），即使伺服器本身一切正常。
 - `SINGBOX_LOG_ENABLED`、`SINGBOX_LOG_LEVEL`：sing-box 伺服器日誌，預設開啟，等級為 `warn`。在 `warn` 等級下不會記錄使用者的連線；DNS 查詢或連線失敗時會記錄目的地，但不含用戶端 IP；每次對 REALITY 連接埠的未經驗證探測都會記錄一行，包含探測者的 IP，可藉此發現主動探測。`info`、`debug` 和 `trace` 會記錄每條連線的用戶端 IP 和目的地，請只在疑難排解時短暫使用。即使關閉日誌，啟動失敗仍會回報（並由 `make all` 顯示）。
 - `SINGBOX_VERSION`：`latest`（預設）或固定版本 `X.Y.Z`，會在首次部署和執行 `make upgrade` 時安裝。
 - `SINGBOX_ENABLE_BBR`：設為 `true`（預設）時，會在 VM 上開啟 BBR 壅塞控制，讓 TCP 更快（供 Hysteria2 使用的 8 MiB UDP 緩衝區則一律會設定）。
@@ -147,9 +149,9 @@
 | `cannot reach REALITY target ...`、`... must speak HTTP/2 over TLS 1.3`，或 `... serves a valid certificate for unrelated hostname ...` | 改用其他位於專用基礎架構上的 `SINGBOX_REALITY_SNI`（請參閱[設定](#設定)）。 |
 | `VM clock is not NTP-synchronized` | 剛建立的 VM 請稍候片刻再執行一次 `make all`，或修復 VM 上的 NTP，或在 `gcp/config.env` 中設為 `SINGBOX_REALITY_MAX_TIME_DIFF=""`。 |
 | 裝置端出現 `reality verification failed` | 裝置時間與伺服器相差超過 `SINGBOX_REALITY_MAX_TIME_DIFF`（預設 1 分鐘），或設定檔仍使用舊金鑰（例如執行過 `make clean` 之後）。請開啟裝置的自動設定日期與時間（在此之前可在**群組**／Groups 頁面將 `proxy` 切換為 `netguru-hy2`，Hysteria2 仍可正常連線）；如果時間無誤，請從 `make show` 重新匯入設定檔。 |
-| 首次啟動 `netguru-client.json` 時因 `initialize rule-set` 而結束 | 無法連上 `netguru-reality` 來下載初始規則集。請改匯入 `netguru-client-full.json`（不需下載規則集），並在**群組**（Groups）頁面將 `proxy` 切換為 `netguru-hy2`。 |
+| 首次啟動 `netguru-client.json` 時因 `initialize rule-set` 而結束 | 無法連上 `netguru-reality` 來下載初始規則集（開啟 `CLIENT_AUTO_FAILOVER` 也不會改變這一點）。請改匯入 `netguru-client-full.json`（不需下載規則集），並在**群組**（Groups）頁面將 `proxy` 切換為 `netguru-hy2`（若已設定 `CLIENT_AUTO_FAILOVER=true`，讓 `proxy` 維持在 `auto` 即可，它會自行改走 Hysteria2）。 |
 | `SSH over IAP to netguru-server not available after 150s` | 請參閱 [SSH 存取](#ssh-存取與-iap_source_range)。 |
-| 之前可以用，現在連不上 | 在 App 的**群組**（Groups）頁面，將 `proxy` 在 `netguru-reality` 和 `netguru-hy2` 之間切換。如果兩者都不行，可能是 IP 位址遭到封鎖：請執行 `make update-ip CONFIRM=1`，並在每台裝置上重新匯入。 |
+| 之前可以用，現在連不上 | 在 App 的**群組**（Groups）頁面，將 `proxy` 在 `netguru-reality` 和 `netguru-hy2` 之間切換。若已設定 `CLIENT_AUTO_FAILOVER=true`，只要 `proxy` 選的是 `auto`，App 會在約 5 分鐘內自行切換（手動選定的伺服器會一直保留，直到你選回 `auto`）。如果兩種協定都無法連線，可能是 IP 位址遭到封鎖：請參閱[如果伺服器的 IP 遭到封鎖](#如果伺服器的-ip-遭到封鎖)。 |
 
 伺服器日誌（在預設的 `warn` 等級下，內容大多是對 REALITY 連接埠的探測）：
 
@@ -157,6 +159,14 @@
 gcloud compute ssh netguru-server --project=YOUR_PROJECT_ID --zone=asia-northeast1-a --tunnel-through-iap \
   --command='sudo journalctl -u sing-box --since -1d'
 ```
+
+## 如果伺服器的 IP 遭到封鎖
+
+當審查系統封鎖 VM 的 IP 位址時，由於 REALITY 和 Hysteria2 共用同一個 IP，兩者會同時中斷。解決方式是執行 `make update-ip CONFIRM=1`，在 Google Cloud 上換成新的靜態 IP 並重新同步伺服器。
+
+- **預留不依賴這台伺服器即可連入 Google Cloud 的管道。** 執行 `make update-ip CONFIRM=1` 需要使用 Cloud Shell（或 `gcloud`），而在中國大陸境內，平時通常正是透過這台代理伺服器連線到 Google Cloud。在真正遇到封鎖之前，請先準備好獨立的備用管道——例如漫遊 SIM 卡、備用代理，或請身處境外、擁有專案權限的可信賴親友協助操作。
+- **未設定 `CLIENT_SERVER_HOST`（預設）：** `make update-ip CONFIRM=1` 會印出新的連結，並用新 IP 重新產生 `netguru-client*.json`。每台裝置都必須重新匯入設定檔或連結；好處是新 IP 與舊 IP 之間沒有任何公開關聯。
+- **已在匯出設定檔前設定 `CLIENT_SERVER_HOST`：** 使用 `netguru-client*.json` 的裝置不需要重新匯入——只要把網域的 `A` 記錄改指向 `make update-ip CONFIRM=1` 印出的新 IP 即可（在 `A` 記錄生效前，`make show` 會顯示警告提醒），但分享連結（`vless://`、`hysteria2://`、`ss://`）仍會改變。相對的代價是放棄新 IP 的隱蔽性：裝置透過 AliDNS（`223.5.5.5`）解析網域時，若權威名稱伺服器位於境外，監看跨境明文 DNS 查詢的人就能順著該名稱追蹤到每一次更換的新 IP；一旦網域名稱本身遭到 DNS 汙染，每台裝置最終還是必須重新匯入新設定檔。
 
 ## SSH 存取與 `IAP_SOURCE_RANGE`
 

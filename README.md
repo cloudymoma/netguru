@@ -135,7 +135,9 @@ More detail:
 - `make clean` deletes the VM and its disk (every key and credential), the static IP, netguru's firewall rules, the
   subnet and the VPC. It refuses if the VM or static IP turns out not to be netguru's, keeps the VPC if anything
   netguru doesn't manage uses it, and leaves the IAP API enabled and your local `netguru-client*.json` files in place.
-- `make test` runs shellcheck and offline unit tests, without GCP access.
+- `make test` runs shellcheck and offline unit tests, without GCP access; `make test-upstream` (Linux) also verifies
+  SagerNet's live GPG signing key and runs the tests against the newest signed stable and testing `sing-box` packages
+  without installing them.
 
 ## Settings
 
@@ -174,6 +176,29 @@ All settings are in [`gcp/config.env`](gcp/config.env), and the defaults work: t
   that `geosite-cn` also includes foreign domains served from China (such as `www.gstatic.com` and
   `fonts.googleapis.com`). Set `false` (or import `netguru-client-full.json`) to send all non-private traffic through
   the proxy.
+- `CLIENT_AUTO_FAILOVER`: `false` by default. When `true` and at least two server outbounds exist, both generated
+  client profiles add an `auto` (`urltest`) group (`interval: 5m`, `idle_timeout: 5m`, `tolerance: 5000ms`) that
+  prefers REALITY, switches to Hysteria2 within about five minutes if REALITY stops working, and stays on Hysteria2
+  until Hysteria2 fails or the app restarts. Every individual server remains selectable in **Groups**, but a server
+  picked there stays selected across restarts and profile imports, and failover is inactive for as long as it is: on a
+  device where `proxy` was ever switched by hand, select `auto` once after importing, and again after any later manual
+  switch. It is off by default because probing wakes the otherwise-silent Hysteria2 UDP port whenever the tunnel
+  carries traffic (on a phone, background traffic means most of the time): at start, on the first use after five idle
+  minutes, and about every ten minutes in steady use. sing-box 1.14.4 sends one burst of about 50–60 datagrams
+  (30–35 KB) per probe and nothing in between (stopping once `idle_timeout` passes), whereas 1.14.2 also sends 2
+  keepalive datagrams every 10 seconds even after probing stops. First launch of `netguru-client.json` while REALITY is
+  down still needs `netguru-client-full.json`, which then reaches Hysteria2 by itself.
+- `CLIENT_SERVER_HOST`: `""` (off) by default. Set it to a DNS hostname you control (with **only an `A` record**
+  pointing at the VM's static IP and a short TTL, such as 60–300 seconds) so both generated client profiles connect by
+  hostname instead of IP literal (`vless://`, `hysteria2://` and `ss://` share links still carry the IP). After an IP
+  rotation, REALITY recovers on the first request once the TTL expires, and Hysteria2 recovers after about 30 seconds
+  when the old IP is silently dropped — with no re-import on devices using `netguru-client*.json`. **Privacy and
+  blocking cost:** DoH (`223.5.5.5`, `ipv4_only`) encrypts the lookup only between the device and AliDNS; AliDNS then
+  queries your domain's authoritative name servers, and if those are outside mainland China that lookup crosses the
+  border in clear text. Anyone who sees that lookup can follow the name to each new IP (giving up the secrecy a fresh
+  IP otherwise has), and if the name itself is DNS-poisoned every device needs a new profile anyway. It also makes
+  AliDNS something the tunnel depends on: when `223.5.5.5` cannot be reached, new REALITY connections fail once the
+  cached answer expires (Hysteria2 only when it has to reconnect), although the server itself is fine.
 - `SINGBOX_LOG_ENABLED`, `SINGBOX_LOG_LEVEL`: sing-box server logging, on at `warn` by default. At `warn`, users'
   connections aren't logged; failed lookups and dials log the destination without the client IP, and every
   unauthenticated probe of the REALITY port logs one line with the prober's IP, which shows active probing. `info`,
@@ -234,9 +259,9 @@ You can also run netguru from a Linux or Mac terminal instead of Cloud Shell (on
 | `cannot reach REALITY target ...`, `... must speak HTTP/2 over TLS 1.3`, or `... serves a valid certificate for unrelated hostname ...` | Choose another `SINGBOX_REALITY_SNI` on dedicated infrastructure (see [Settings](#settings)). |
 | `VM clock is not NTP-synchronized` | Wait a moment on a brand-new VM and re-run `make all`, fix NTP on the VM, or set `SINGBOX_REALITY_MAX_TIME_DIFF=""` in `gcp/config.env`. |
 | `reality verification failed` on a client device | Either the device's clock is off by more than `SINGBOX_REALITY_MAX_TIME_DIFF` (1 minute by default) or its profile holds old credentials (for example after `make clean`). Turn on automatic date and time (switch `proxy` to `netguru-hy2` in **Groups** in the meantime — Hysteria2 still works); if the clock is right, re-import the profile from `make show`. |
-| First launch of `netguru-client.json` exits with `initialize rule-set` | `netguru-reality` could not be reached to fetch the initial rule-sets. Import `netguru-client-full.json` instead (no rule-set download) and switch `proxy` to `netguru-hy2` in **Groups**. |
+| First launch of `netguru-client.json` exits with `initialize rule-set` | `netguru-reality` could not be reached to fetch the initial rule-sets (turning on `CLIENT_AUTO_FAILOVER` does not change this). Import `netguru-client-full.json` instead (no rule-set download) and switch `proxy` to `netguru-hy2` in **Groups** (with `CLIENT_AUTO_FAILOVER=true`, leave `proxy` on `auto`: it reaches Hysteria2 by itself). |
 | `SSH over IAP to netguru-server not available after 150s` | See [SSH access](#ssh-access-and-iap_source_range). |
-| It worked before, but no longer connects | In the app's **Groups** view, switch `proxy` between `netguru-reality` and `netguru-hy2`. If neither works, the IP address may be blocked: run `make update-ip CONFIRM=1` and re-import on every device. |
+| It worked before, but no longer connects | In the app's **Groups** view, switch `proxy` between `netguru-reality` and `netguru-hy2`. With `CLIENT_AUTO_FAILOVER=true` the app does this on its own within about five minutes, as long as `proxy` is on `auto` (a server picked by hand stays picked until you select `auto` again). If neither protocol works, the IP address is probably blocked: see [If the server's IP is blocked](#if-the-servers-ip-is-blocked). |
 
 Server logs (with the default `warn` level, mostly probes of the REALITY port):
 
@@ -244,6 +269,25 @@ Server logs (with the default `warn` level, mostly probes of the REALITY port):
 gcloud compute ssh netguru-server --project=YOUR_PROJECT_ID --zone=asia-northeast1-a --tunnel-through-iap \
   --command='sudo journalctl -u sing-box --since -1d'
 ```
+
+## If the server's IP is blocked
+
+When a censor blocks the VM's IP address, both REALITY and Hysteria2 stop working at once because they share that IP.
+The fix is `make update-ip CONFIRM=1`, which swaps in a new static IP on Google Cloud and re-syncs the server.
+
+- **Keep an independent way into Google Cloud.** Running `make update-ip CONFIRM=1` requires Cloud Shell (or `gcloud`),
+  and from mainland China Google Cloud itself is normally reached through this proxy. Before you need it, make sure you
+  have a path that does not depend on this server — for example a roaming SIM, a backup proxy, or a trusted person
+  abroad with access to the project.
+- **Without `CLIENT_SERVER_HOST` (the default):** `make update-ip CONFIRM=1` prints new links and rewrites
+  `netguru-client*.json` with the new IP. Every device must re-import its profile or links, and the new IP starts with
+  no prior tie to the old one.
+- **With `CLIENT_SERVER_HOST` set before deploying profiles:** devices using `netguru-client*.json` need no re-import —
+  update the hostname's `A` record to the new IP that `make update-ip CONFIRM=1` prints (`make show` warns until the
+  `A` record matches), while share links (`vless://`, `hysteria2://`, `ss://`) still change. In return, you give up
+  fresh-IP secrecy: because devices resolve the name through AliDNS (`223.5.5.5`), an observer who sees AliDNS's
+  clear-text query to foreign authoritative name servers can follow the hostname to each new IP, and if the hostname
+  itself is DNS-poisoned every device must re-import a new profile anyway.
 
 ## SSH access and `IAP_SOURCE_RANGE`
 

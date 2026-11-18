@@ -6,7 +6,7 @@ SERVICES := $(shell bash -c '. gcp/lib.sh && echo "$$SERVICES"')
 OFF_SERVICES := $(filter-out $(SERVICES),$(notdir $(patsubst %/service.env,%,$(wildcard gcp/services/*/service.env))))
 # Destructive targets honor CONFIRM only from the make command line, never from an exported environment variable.
 CONFIRM_ARG = $(if $(filter command line,$(origin CONFIRM)),$(CONFIRM))
-.PHONY: help all infra $(SERVICES) $(OFF_SERVICES) upgrade $(addprefix upgrade-,$(SERVICES) $(OFF_SERVICES)) show verify update-ip clean test
+.PHONY: help all infra $(SERVICES) $(OFF_SERVICES) upgrade $(addprefix upgrade-,$(SERVICES) $(OFF_SERVICES)) show verify update-ip clean test test-upstream
 
 help:
 	@printf '%s\n' \
@@ -25,7 +25,8 @@ help:
 	  '  verify               Run end-to-end tunnel, metadata-blocking, port, and firewall checks' \
 	  '  update-ip CONFIRM=1  Rotate the VM'\''s public static IP and re-sync services (every client config changes)' \
 	  '  clean                Show what would be deleted; with CONFIRM=<project>, delete all netguru resources on GCP' \
-	  '  test                 Run shellcheck and offline unit tests'
+	  '  test                 Run shellcheck and offline unit tests' \
+	  '  test-upstream        Verify live SagerNet key and run unit tests against latest stable + testing sing-box'
 
 all: infra $(SERVICES) show
 
@@ -62,3 +63,7 @@ clean:
 test:
 	shellcheck -x -P SCRIPTDIR gcp/*.sh gcp/services/*/*.sh gcp/tests/*.sh
 	gcp/tests/run.sh
+
+test-upstream:
+	shellcheck -x -P SCRIPTDIR gcp/*.sh gcp/services/*/*.sh gcp/tests/*.sh
+	gcp/tests/upstream.sh

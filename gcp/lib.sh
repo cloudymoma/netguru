@@ -113,12 +113,31 @@ build_remote_cmd() {
   printf '%s bash -s' "$cmd"
 }
 
+# resolve_ipv4 HOST -> HOST's IPv4 addresses as this computer's resolver sees them, one per line, sorted (nothing when
+# HOST does not resolve). Returns 2 when there is nothing to ask with: getent (Linux, Cloud Shell) or dig (macOS has
+# no getent).
+resolve_ipv4() {
+  if command -v getent >/dev/null 2>&1; then
+    { getent ahostsv4 "$1" 2>/dev/null || true; } | awk '{print $1}' | sort -u
+  elif command -v dig >/dev/null 2>&1; then
+    { dig +short +time=3 +tries=1 A "$1" 2>/dev/null || true; } | { grep -E '^[0-9]+([.][0-9]+){3}$' || true; } | sort -u
+  else
+    return 2
+  fi
+}
+
+validate_client_config() {
+  require_bool CLIENT_BYPASS_CN "${CLIENT_BYPASS_CN}"
+  require_bool CLIENT_AUTO_FAILOVER "${CLIENT_AUTO_FAILOVER}"
+  [[ -z "${CLIENT_SERVER_HOST}" ]] || require_hostname CLIENT_SERVER_HOST "${CLIENT_SERVER_HOST}"
+}
+
 validate_config() {
   local v s
   for v in GCP_PROJECT GCP_REGION GCP_ZONE VM_NAME NETWORK_NAME SUBNET_RANGE NETWORK_TAG STATIC_IP_NAME IAP_SOURCE_RANGE; do
     require_not_tbd "$v" "${!v}"
   done
-  require_bool CLIENT_BYPASS_CN "${CLIENT_BYPASS_CN}"
+  validate_client_config
   for s in $(known_services); do
     v=$(service_switch "$s")
     require_bool "$v" "${!v:-}"
@@ -155,25 +174,42 @@ quay_tag_digest() {
 # --- client profile -------------------------------------------------------------
 # client_profile — stdin: JSON array of sing-box outbounds (SHOW_FORMAT=json); stdout: a complete sing-box 1.14+
 # client profile for SFI/SFA/SFM: TUN, DNS over HTTPS through the proxy (plus AliDNS DoH + cached CN rule-sets when
-# CLIENT_BYPASS_CN=true), private destinations direct, and a "proxy" selector over every server (REALITY by default).
+# CLIENT_BYPASS_CN=true), optional 5m/5m urltest failover (CLIENT_AUTO_FAILOVER=true), optional server hostname
+# resolved via ipv4_only AliDNS DoH (CLIENT_SERVER_HOST), and private destinations direct.
 client_profile() {
   local outbounds
   outbounds=$(cat)
   jq -e 'length > 0' <<<"$outbounds" >/dev/null || die "no client outbounds: is any service installed?"
-  jq --argjson bypass_cn "${CLIENT_BYPASS_CN}" '
+  jq --argjson bypass_cn "${CLIENT_BYPASS_CN}" --argjson auto "${CLIENT_AUTO_FAILOVER}" --arg host "${CLIENT_SERVER_HOST}" '
     def rs($tag; $repo): {type: "remote", tag: $tag, format: "binary",
                           url: "https://raw.githubusercontent.com/SagerNet/\($repo)/rule-set/\($tag).srs"};
-    ({
+    (map(.tag)) as $servers
+    | (if $host != "" then
+         (if $bypass_cn then "cn-dns" else "bootstrap" end) as $res
+         | map(.server = $host | .domain_resolver = {server: $res, strategy: "ipv4_only"})
+       else . end) as $srv
+    | ({
       log: {level: "warn"},
       dns: ({servers: ([{type: "https", tag: "remote", server: "1.1.1.1", detour: "proxy"}]
-                       + if $bypass_cn then [{type: "https", tag: "cn-dns", server: "223.5.5.5"}] else [] end),
+                       + if $bypass_cn then [{type: "https", tag: "cn-dns", server: "223.5.5.5"}]
+                         elif $host != "" then [{type: "https", tag: "bootstrap", server: "223.5.5.5"}]
+                         else [] end),
              final: "remote"}
             + if $bypass_cn then {rules: [{rule_set: ["geosite-cn"], server: "cn-dns"}]} else {} end),
       inbounds: [{type: "tun", tag: "tun-in", address: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
                   auto_route: true, strict_route: true}],
-      outbounds: ([{type: "selector", tag: "proxy", outbounds: map(.tag),
-                    default: ((map(select(.type == "vless") | .tag) + map(.tag))[0])}]
-                  + . + [{type: "direct", tag: "direct"}]),
+      outbounds: ((if $auto and ($servers | length) > 1 then
+                     [{type: "selector", tag: "proxy", outbounds: (["auto"] + $servers), default: "auto"},
+                      {type: "urltest", tag: "auto",
+                       outbounds: ([$srv[] | select(.type == "vless") | .tag]
+                                   + [$srv[] | select(.type == "hysteria2") | .tag]
+                                   + [$srv[] | select(.type != "vless" and .type != "hysteria2") | .tag]),
+                       url: "https://www.gstatic.com/generate_204", interval: "5m", idle_timeout: "5m", tolerance: 5000}]
+                   else
+                     [{type: "selector", tag: "proxy", outbounds: $servers,
+                       default: ((map(select(.type == "vless") | .tag) + $servers)[0])}]
+                   end)
+                  + $srv + [{type: "direct", tag: "direct"}]),
       route: ({rules: ([{action: "sniff"}, {protocol: "dns", action: "hijack-dns"},
                         {ip_is_private: true, outbound: "direct"}]
                        + if $bypass_cn then [{rule_set: ["geosite-cn", "geoip-cn"], outbound: "direct"}] else [] end),

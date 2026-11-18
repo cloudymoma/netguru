@@ -503,6 +503,105 @@ expect_eq "client profile defaults to the first server when REALITY is absent" \
   "outline-0"
 expect_fail "client profile refuses an empty server list" client_profile <<<'[]'
 
+# CLIENT_AUTO_FAILOVER=true: adds a 5m/5m urltest ("auto": vless -> hysteria2 -> rest) when >=2 servers; 1 server stays plain.
+vm_fn "$OUTLINE_SHOW" keys_to_outbounds 1.2.3.4 <"${FIXTURES}/outline-access-keys.json" |
+  jq -s 'add' - "${SB_TMP}/outbounds.json" | jq -s 'add' |
+  CLIENT_AUTO_FAILOVER=true client_profile >"${SB_TMP}/profile-auto.json"
+expect_ok "auto-failover bypass-CN profile passes 'sing-box check'" sing-box check -c "${SB_TMP}/profile-auto.json"
+expect_eq "auto-failover selector defaults to auto while keeping every server selectable" \
+  "$(jq -c '.outbounds[0]' "${SB_TMP}/profile-auto.json")" \
+  '{"type":"selector","tag":"proxy","outbounds":["auto","outline-0","outline-3","netguru-reality","netguru-hy2"],"default":"auto"}'
+expect_eq "auto-failover urltest orders REALITY, Hysteria2, then other servers with 5m/5m and tolerance 5000" \
+  "$(jq -c '.outbounds[1]' "${SB_TMP}/profile-auto.json")" \
+  '{"type":"urltest","tag":"auto","outbounds":["netguru-reality","netguru-hy2","outline-0","outline-3"],"url":"https://www.gstatic.com/generate_204","interval":"5m","idle_timeout":"5m","tolerance":5000}'
+CLIENT_BYPASS_CN=false CLIENT_AUTO_FAILOVER=true client_profile <"${SB_TMP}/outbounds.json" >"${SB_TMP}/profile-full-auto.json"
+expect_ok "auto-failover full-tunnel profile passes 'sing-box check'" sing-box check -c "${SB_TMP}/profile-full-auto.json"
+expect_eq "auto-failover applies to full-tunnel profile too" \
+  "$(jq -c '[.outbounds[0].default, .outbounds[1].type, .outbounds[1].outbounds]' "${SB_TMP}/profile-full-auto.json")" \
+  '["auto","urltest",["netguru-reality","netguru-hy2"]]'
+jq '[.[0]]' "${SB_TMP}/outbounds.json" | CLIENT_AUTO_FAILOVER=true client_profile >"${SB_TMP}/profile-one.json"
+expect_ok "single-server profile with CLIENT_AUTO_FAILOVER=true passes 'sing-box check'" sing-box check -c "${SB_TMP}/profile-one.json"
+expect_eq "with one server, CLIENT_AUTO_FAILOVER=true leaves the selector unchanged (no urltest)" \
+  "$(jq -c '[.outbounds[].type]' "${SB_TMP}/profile-one.json")" '["selector","vless","direct"]'
+
+# CLIENT_SERVER_HOST: sets server + ipv4_only domain_resolver on server outbounds; reuses cn-dns on bypass-CN, adds bootstrap on full-tunnel.
+CLIENT_SERVER_HOST=proxy.example.com CLIENT_AUTO_FAILOVER=true client_profile <"${SB_TMP}/outbounds.json" >"${SB_TMP}/profile-host-cn.json"
+expect_ok "bypass-CN profile with CLIENT_SERVER_HOST and failover passes 'sing-box check'" sing-box check -c "${SB_TMP}/profile-host-cn.json"
+expect_eq "bypass-CN with CLIENT_SERVER_HOST reuses cn-dns (ipv4_only) without adding a duplicate DNS server" \
+  "$(jq -c '[([.dns.servers[].tag]), ([.outbounds[] | select(.type=="vless" or .type=="hysteria2") | [.server, .domain_resolver]]), ([.outbounds[] | select(.type!="vless" and .type!="hysteria2") | has("domain_resolver")])]' "${SB_TMP}/profile-host-cn.json")" \
+  '[["remote","cn-dns"],[["proxy.example.com",{"server":"cn-dns","strategy":"ipv4_only"}],["proxy.example.com",{"server":"cn-dns","strategy":"ipv4_only"}]],[false,false,false]]'
+CLIENT_BYPASS_CN=false CLIENT_SERVER_HOST=proxy.example.com client_profile <"${SB_TMP}/outbounds.json" >"${SB_TMP}/profile-host-full.json"
+expect_ok "full-tunnel profile with CLIENT_SERVER_HOST passes 'sing-box check'" sing-box check -c "${SB_TMP}/profile-host-full.json"
+expect_eq "full-tunnel with CLIENT_SERVER_HOST adds AliDNS bootstrap DoH and uses ipv4_only" \
+  "$(jq -c '[.dns.servers, ([.outbounds[] | select(.type=="vless" or .type=="hysteria2") | [.server, .domain_resolver]])]' "${SB_TMP}/profile-host-full.json")" \
+  '[[{"type":"https","tag":"remote","server":"1.1.1.1","detour":"proxy"},{"type":"https","tag":"bootstrap","server":"223.5.5.5"}],[["proxy.example.com",{"server":"bootstrap","strategy":"ipv4_only"}],["proxy.example.com",{"server":"bootstrap","strategy":"ipv4_only"}]]]'
+CLIENT_BYPASS_CN=false CLIENT_AUTO_FAILOVER=true CLIENT_SERVER_HOST=proxy.example.com \
+  client_profile <"${SB_TMP}/outbounds.json" >"${SB_TMP}/profile-host-full-auto.json"
+
+# Early-warning deprecation checks: sing-box check must emit empty stderr, and sing-box run start-up (offline, keeping
+# the rule_set block via compiled local initial_path files) must start cleanly with no deprecation lines.
+for cfg in server.json server-notd.json server-plain.json profile.json profile-full.json \
+  profile-auto.json profile-full-auto.json profile-one.json profile-host-cn.json \
+  profile-host-full.json profile-host-full-auto.json; do
+  expect_eq "'sing-box check' is silent on ${cfg}" "$(sing-box check -c "${SB_TMP}/${cfg}" 2>&1)" ""
+done
+
+printf '{"version":2,"rules":[{"domain_suffix":["example.cn"]}]}\n' >"${SB_TMP}/geosite-cn.json"
+printf '{"version":2,"rules":[{"ip_cidr":["198.51.100.0/24"]}]}\n' >"${SB_TMP}/geoip-cn.json"
+expect_ok "compile local geosite-cn.srs fixture" sing-box rule-set compile "${SB_TMP}/geosite-cn.json" -o "${SB_TMP}/geosite-cn.srs"
+expect_ok "compile local geoip-cn.srs fixture"   sing-box rule-set compile "${SB_TMP}/geoip-cn.json" -o "${SB_TMP}/geoip-cn.srs"
+
+sb_two_ports() {
+  python3 -c 'import socket; ss=[socket.socket() for _ in range(2)]; [s.bind(("127.0.0.1",0)) for s in ss]; print(ss[0].getsockname()[1], ss[1].getsockname()[1])'
+}
+sb_run_startup_clean() {
+  local cfg=$1 dir pid i log
+  dir=$(mktemp -d "${SB_TMP}/run.XXXXXX")
+  log="${dir}/run.log"
+  sing-box run -c "$cfg" -D "$dir" >"$log" 2>&1 &
+  pid=$!
+  for i in $(seq 1 30); do
+    kill -0 "$pid" 2>/dev/null || break
+    if grep -q 'sing-box started' "$log"; then
+      sleep 0.15
+      break
+    fi
+    sleep 0.1
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  grep -q 'sing-box started' "$log" && ! grep -qi 'deprecat' "$log"
+}
+sb_prepare_client_twin() {
+  local src=$1 dst=$2 extra_rs=${3:-.} cport dead_port
+  read -r cport dead_port < <(sb_two_ports)
+  jq --argjson cport "$cport" --argjson dead "$dead_port" --arg dir "$SB_TMP" "
+    .log = {level: \"info\"}
+    | .inbounds = [{type: \"mixed\", tag: \"mixed-in\", listen: \"127.0.0.1\", listen_port: \$cport}]
+    | del(.route.auto_detect_interface)
+    | .dns.servers |= map(.server = \"127.0.0.1\" | .server_port = \$dead)
+    | .outbounds |= map(if (.server? // \"\") == \"1.2.3.4\" then .server = \"127.0.0.1\" | .server_port = \$dead else . end)
+    | if (.route | has(\"rule_set\")) then
+        .route.rule_set |= map(.initial_path = (\$dir + \"/\" + .tag + \".srs\") | ${extra_rs})
+      else . end
+  " "$src" >"$dst"
+}
+read -r SB_RPORT SB_HPORT < <(sb_two_ports)
+jq --argjson rp "$SB_RPORT" --argjson hp "$SB_HPORT" '
+  .log = {level: "info"}
+  | .inbounds[0].listen = "127.0.0.1" | .inbounds[0].listen_port = $rp
+  | .inbounds[1].listen = "127.0.0.1" | .inbounds[1].listen_port = $hp
+' "${SB_TMP}/server.json" >"${SB_TMP}/server-run.json"
+expect_ok "rendered server config starts with no deprecation warnings" sb_run_startup_clean "${SB_TMP}/server-run.json"
+
+for p in profile.json profile-full.json profile-host-cn.json profile-host-full-auto.json; do
+  sb_prepare_client_twin "${SB_TMP}/${p}" "${SB_TMP}/run-${p}"
+  expect_ok "client ${p} starts offline with no deprecation warnings" sb_run_startup_clean "${SB_TMP}/run-${p}"
+done
+sb_prepare_client_twin "${SB_TMP}/profile.json" "${SB_TMP}/run-deprecated.json" '.download_detour = "proxy"'
+expect_fail "start-up check catches a run-only rule-set deprecation (download_detour)" \
+  sb_run_startup_clean "${SB_TMP}/run-deprecated.json"
+
 # The profile file holds client secrets: owner-only even when it replaces an older, looser file; never clobbered by a failure.
 printf 'old\n' >"${SB_TMP}/netguru-client.json"
 chmod 644 "${SB_TMP}/netguru-client.json"

@@ -5,11 +5,19 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 if [[ "${CONFIRM:-}" != 1 ]]; then
-  cat >&2 <<PLAN
+  if [[ -n "${CLIENT_SERVER_HOST}" ]]; then
+    cat >&2 <<PLAN
+make update-ip gives ${VM_NAME} a NEW public IP: Outline keys, vless:// and hysteria2:// share links change.
+Devices using netguru-client*.json (CLIENT_SERVER_HOST=${CLIENT_SERVER_HOST}) need no re-import once you point that A record at the new IP.
+Re-run with CONFIRM=1 to proceed.
+PLAN
+  else
+    cat >&2 <<PLAN
 make update-ip gives ${VM_NAME} a NEW public IP: every Outline key, vless:// and hysteria2:// config changes.
 Clients must be re-configured from the output of 'make show' afterwards.
 Re-run with CONFIRM=1 to proceed.
 PLAN
+  fi
   exit 1
 fi
 

@@ -23,7 +23,13 @@ expect_fail "shell metachars rejected"        require_hostname H 'www.a.com$(id)
 expect_fail "bare label rejected"             require_hostname H localhost
 expect_fail "IP is not a hostname"            require_hostname H 1.2.3.4
 
-expect_fail "CLIENT_BYPASS_CN must be bool"   bash -c '. gcp/lib.sh; CLIENT_BYPASS_CN=yes; validate_config'
+expect_fail "CLIENT_BYPASS_CN must be bool"     bash -c '. gcp/lib.sh; CLIENT_BYPASS_CN=yes; validate_config'
+expect_eq   "CLIENT_AUTO_FAILOVER defaults off" "${CLIENT_AUTO_FAILOVER}" "false"
+expect_fail "CLIENT_AUTO_FAILOVER must be bool" bash -c '. gcp/lib.sh; CLIENT_AUTO_FAILOVER=yes; validate_config'
+expect_eq   "CLIENT_SERVER_HOST defaults empty" "${CLIENT_SERVER_HOST}" ""
+expect_ok   "CLIENT_SERVER_HOST accepts domain" bash -c '. gcp/lib.sh; CLIENT_SERVER_HOST=proxy.example.com; validate_config'
+expect_fail "CLIENT_SERVER_HOST rejects IPv4"   bash -c '. gcp/lib.sh; CLIENT_SERVER_HOST=1.2.3.4; validate_config'
+expect_fail "CLIENT_SERVER_HOST rejects label"  bash -c '. gcp/lib.sh; CLIENT_SERVER_HOST=localhost; validate_config'
 
 expect_ok   "sha256 accepted"                 require_sha256 S e7594b713d19b365765690624afbabe3c97ab96eb377d43630fc3c6a27d5b986
 expect_fail "short sha256 rejected"           require_sha256 S e7594b71
