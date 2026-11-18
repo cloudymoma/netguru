@@ -244,6 +244,13 @@ expect_ok   "upstream runner verifies signed repo and runs both newest stable an
   up_run "$UP_FPR" "${UP_TMP}/repo"
 expect_eq   "upstream runner prepends unpacked stable then testing sing-box to PATH" \
   "$(tr '\n' '|' <"${UP_TMP}/ran")" "sing-box version 1.14.99|sing-box version 1.15.0-alpha.99|"
+# Without dpkg-deb (Linux distributions that are not Debian-based) the runner unpacks with ar and tar.
+AR_BIN=$(mktemp -d)
+for tool in ar tar gzip grep head mkdir rm; do ln -s "$(command -v "$tool")" "$AR_BIN/"; done
+# shellcheck disable=SC2016
+expect_ok   "upstream runner unpacks a package with ar and tar when dpkg-deb is missing" \
+  bash -c 'NETGURU_SOURCE_ONLY=1; . gcp/tests/upstream.sh; PATH=$1; extract_deb "$2/repo/files/sb.deb" "$2/unpacked"; [[ -x "$2/unpacked/usr/bin/sing-box" ]]' _ "$AR_BIN" "$UP_TMP"
+rm -rf "$AR_BIN"
 
 : >"${UP_TMP}/ran"
 expect_fail "upstream runner rejects wrong pinned GPG fingerprint" \

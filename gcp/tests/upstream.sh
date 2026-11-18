@@ -95,7 +95,10 @@ extract_deb() {
   elif command -v ar >/dev/null 2>&1; then
     data_tar=$(ar t "$deb" | grep -E '^data\.tar(\.[a-z0-9]+)?$' | head -n1)
     [[ -n "$data_tar" ]] || u_die "no data.tar member in ${deb}"
-    ar p "$deb" "$data_tar" | tar -C "$dst" -xf -
+    # Through a file, not a pipe: tar can detect the compression only in a file it can re-read.
+    ar p "$deb" "$data_tar" >"${dst}.${data_tar}"
+    tar -C "$dst" -xf "${dst}.${data_tar}"
+    rm -f "${dst}.${data_tar}"
   else
     u_die "need dpkg-deb or ar to unpack ${deb}"
   fi
