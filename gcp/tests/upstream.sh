@@ -88,7 +88,7 @@ newest_package_entry() {
 }
 
 extract_deb() {
-  local deb=$1 dst=$2 data_tar
+  local deb=$1 dst=$2 data_tar tmp_tar
   mkdir -p "$dst"
   if command -v dpkg-deb >/dev/null 2>&1; then
     dpkg-deb -x "$deb" "$dst"
@@ -96,9 +96,10 @@ extract_deb() {
     data_tar=$(ar t "$deb" | grep -E '^data\.tar(\.[a-z0-9]+)?$' | head -n1)
     [[ -n "$data_tar" ]] || u_die "no data.tar member in ${deb}"
     # Through a file, not a pipe: tar can detect the compression only in a file it can re-read.
-    ar p "$deb" "$data_tar" >"${dst}.${data_tar}"
-    tar -C "$dst" -xf "${dst}.${data_tar}"
-    rm -f "${dst}.${data_tar}"
+    tmp_tar="${dst%/}.${data_tar}"
+    ar p "$deb" "$data_tar" >"$tmp_tar"
+    tar -C "$dst" -xf "$tmp_tar"
+    rm -f "$tmp_tar"
   else
     u_die "need dpkg-deb or ar to unpack ${deb}"
   fi
